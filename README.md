@@ -24,6 +24,7 @@ three gaps:
 | `beads-tools hook commit-msg` | Checks a commit's `Closes:`/`Refs:` trailers (git runs it). |
 | `beads-tools land pr N` | Closes the issues PR *N* closes, on its branch, then merges it. |
 | `beads-tools land sweep` | Closes issues whose closing commits are already on the main branch. |
+| `beads-tools check` | Applies `land pr`'s trailer rules to a range of commits, for CI. |
 
 ## Install
 
@@ -113,6 +114,20 @@ commit whose trailers name an issue that does not exist and, when
 reverts and `.beads/`-only commits are exempt). It lists the offending
 commits; reword them, push, and land again. `--dry-run` reports the same
 refusal.
+
+**`beads-tools check`** applies the same rules without `gh` or `br`, so CI
+can show a failing check on a PR before anyone merges it, including through
+the web UI, where `land pr` never runs:
+
+```sh
+beads-tools check                                   # <remote>/<main>..HEAD
+beads-tools check --base origin/main --head HEAD    # explicit range
+```
+
+It reads the issues file at `--head`, prints each offending commit and exits
+1 when any commit fails the rules (2 on errors). On a GitHub pull request
+the checked-out HEAD is a synthetic merge commit, which counts as a merge and
+is exempt.
 
 **`beads-tools land sweep`** is the backstop for PRs merged some other way,
 such as the GitHub web UI. It finds issues that commits on the main branch
