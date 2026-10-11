@@ -1,6 +1,6 @@
 module github.com/brynbellomy/beads-tools
 
-go 1.27.1
+go 1.25
 
 require (
 	github.com/brynbellomy/go-utils v0.0.0-20260826204239-6f7947940f7d
