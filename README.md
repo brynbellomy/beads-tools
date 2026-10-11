@@ -106,6 +106,14 @@ those issues, pushes it (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. The work
 and its closes reach the main branch in the same merge.
 
+`land pr` applies the commit-msg hook's rules to every commit in the PR, so a
+clone without the hook cannot land unlinked work: it refuses a PR with any
+commit whose trailers name an issue that does not exist and, when
+`beadstools.requireTrailers` is on, any commit that names no issue (merges,
+reverts and `.beads/`-only commits are exempt). It lists the offending
+commits; reword them, push, and land again. `--dry-run` reports the same
+refusal.
+
 **`beads-tools land sweep`** is the backstop for PRs merged some other way,
 such as the GitHub web UI. It finds issues that commits on the main branch
 close but that are still open there, closes them on a fresh branch, opens a
@@ -138,7 +146,7 @@ All optional, in git config:
 | `beadstools.remote` | `origin` | Remote to publish to. |
 | `beadstools.mainBranch` | the remote's HEAD, else `main` | Branch that counts as merged. |
 | `beadstools.mergeMethod` | `merge` | `merge`, `squash` or `rebase`. `sweep` reads trailers from the main branch's history, and git only parses trailers in a message's last paragraph, so a squash message that concatenates several commits keeps only the last one's. Prefer `merge`. |
-| `beadstools.requireTrailers` | `true` | Require a trailer on commits off the main branch. |
+| `beadstools.requireTrailers` | `true` | Require a trailer on commits off the main branch, in the hook and in `land pr`. |
 
 ## Working with br
 

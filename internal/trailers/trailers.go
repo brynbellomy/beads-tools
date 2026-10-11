@@ -76,6 +76,7 @@ func ParseMessage(ctx context.Context, repo gitx.Repo, message string) (Refs, er
 // Commit is one commit and the issues it names.
 type Commit struct {
 	SHA     string
+	Parents []string
 	Subject string
 	Refs
 	// Reverts is the commit this one reverts, from git's standard
@@ -93,7 +94,7 @@ func Log(ctx context.Context, repo gitx.Repo, revRange ...string) ([]Commit, err
 		record = "\x1e"
 	)
 	format := strings.Join([]string{
-		"%H", "%s",
+		"%H", "%P", "%s",
 		"%(trailers:key=" + KeyCloses + ",valueonly,separator=%x2C,unfold)",
 		"%(trailers:key=" + KeyRefs + ",valueonly,separator=%x2C,unfold)",
 		"%b",
@@ -109,16 +110,17 @@ func Log(ctx context.Context, repo gitx.Repo, revRange ...string) ([]Commit, err
 		if rec == "" {
 			continue
 		}
-		parts := strings.SplitN(rec, field, 5)
-		if len(parts) != 5 {
+		parts := strings.SplitN(rec, field, 6)
+		if len(parts) != 6 {
 			return nil, errors.WithNew("unexpected git log record").Set("record", rec).Err()
 		}
 		c := Commit{
 			SHA:     parts[0],
-			Subject: parts[1],
-			Refs:    Refs{Closes: SplitIDs(parts[2]), Refs: SplitIDs(parts[3])},
+			Parents: strings.Fields(parts[1]),
+			Subject: parts[2],
+			Refs:    Refs{Closes: SplitIDs(parts[3]), Refs: SplitIDs(parts[4])},
 		}
-		if m := revertLine.FindStringSubmatch(parts[4]); m != nil {
+		if m := revertLine.FindStringSubmatch(parts[5]); m != nil {
 			c.Reverts = m[1]
 		}
 		commits = append(commits, c)

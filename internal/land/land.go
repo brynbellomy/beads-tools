@@ -207,6 +207,18 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	if err != nil {
 		return err
 	}
+	unlinked, err := FindUnlinked(ctx, l.Repo, commits, issues, l.Repo.ConfigBool(ctx, "beadstools.requireTrailers", true))
+	if err != nil {
+		return err
+	}
+	if len(unlinked) > 0 {
+		for _, u := range unlinked {
+			l.printf("refuse %s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
+		}
+		return errors.WithNew(fmt.Sprintf("%d commit(s) on %s do not name a valid issue; reword them "+
+			"(git rebase -i %s/%s, then reword) to end with a Closes: or Refs: trailer, push, and land again",
+			len(unlinked), pr.HeadRefName, remote, pr.BaseRefName)).Err()
+	}
 	planned, skipped := Plan(commits, issues, func(c trailers.Commit) string {
 		return fmt.Sprintf("Closed by #%d (%s %s)", number, short(c.SHA), c.Subject)
 	})

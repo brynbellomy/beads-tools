@@ -127,9 +127,12 @@ func TestPR_ClosesOnTheBranchThenMergesThatHead(t *testing.T) {
 func TestPR_WithNothingToCloseMergesTheHeadAsIs(t *testing.T) {
 	remote := testrepo.NewRemote(t)
 	r := testrepo.New(t, remote)
+	id := r.Create("progress")
+	r.Commit("add issue")
+	r.G("push", "-q", "origin", "main")
 	r.G("checkout", "-q", "-b", "feat/y")
 	r.Write("y.go", "package y\n")
-	head := r.Commit("chore: y")
+	head := r.Commit("chore: y\n\nRefs: " + id)
 	r.G("push", "-q", "origin", "feat/y")
 
 	gh := mocks.NewMockGitHub(t)
