@@ -1,0 +1,15 @@
+# .mockery.yaml — mockery v3 configuration
+log-level: info
+formatter: goimports
+force-file-write: true
+template: testify
+packages:
+  github.com/brynbellomy/beads-tools/internal/land:
+    interfaces:
+      GitHub:
+      Beads:
+    config:
+      dir: "{{.InterfaceDir}}/mocks"
+      pkgname: "mocks"
+      structname: "Mock{{.InterfaceName}}"
+      filename: "mock_{{.InterfaceName | snakecase}}.go"
