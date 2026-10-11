@@ -83,8 +83,10 @@ Closes: proj-k83ff.1
 Refs: proj-zz1ha
 ```
 
-- `Closes:` — the issue is done once this commit is on the main branch.
-- `Refs:` — progress only.
+- `Closes:` — the issue is done once this commit is on the main branch. The
+  commit that finishes an issue carries it.
+- `Refs:` — the issue is not finished by this commit. A PR whose commits
+  only reference an issue leaves it open, and `land pr` asks about it.
 
 Several IDs can share one trailer, separated by commas or spaces. Trailer keys
 are case-insensitive.
@@ -107,6 +109,14 @@ those issues, pushes it (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. The work
 and its closes reach the main branch in the same merge.
 
+An issue the PR's commits name only with `Refs:` would stay open after the
+merge, so `land pr` asks for a decision instead of guessing. It lists each
+one and refuses to land until you either pass `--close <id>` (repeatable),
+which closes it in the same landing commit, or pass `--keep-open` to confirm
+the PR finishes none of them. Epics are not asked about: every commit
+references its epic. An issue already closed on the branch, or closed by a
+`Closes:` trailer, needs no decision.
+
 `land pr` applies the commit-msg hook's rules to every commit in the PR, so a
 clone without the hook cannot land unlinked work: it refuses a PR with any
 commit whose trailers name an issue that does not exist and, when
@@ -127,12 +137,17 @@ beads-tools check --base origin/main --head HEAD    # explicit range
 It reads the issues file at `--head`, prints each offending commit and exits
 1 when any commit fails the rules (2 on errors). On a GitHub pull request
 the checked-out HEAD is a synthetic merge commit, which counts as a merge and
-is exempt.
+is exempt. It also prints a note for each issue the range references with
+`Refs:` but does not close, without failing: a reminder to add `Closes:` to
+the finishing commit before `land pr` asks.
 
 **`beads-tools land sweep`** is the backstop for PRs merged some other way,
 such as the GitHub web UI. It finds issues that commits on the main branch
 close but that are still open there, closes them on a fresh branch, opens a
-PR, merges it and deletes the branch.
+PR, merges it and deletes the branch. It also lists issues that recent
+commits on the main branch reference with `Refs:` but that nothing closed
+(`--since`, default two weeks): a PR merged without `land pr` never got
+asked about them, so close the finished ones by hand.
 
 Both accept `--dry-run` (print the plan, change nothing) and `--no-merge`
 (push and open, but leave merging to a person).

@@ -28,12 +28,24 @@ type Lander struct {
 	Now    func() time.Time
 }
 
+// DefaultSince is how far back sweep reports referenced issues that are still open.
+const DefaultSince = "2 weeks ago"
+
 // Options shape one landing run.
 type Options struct {
 	// DryRun prints the plan and changes nothing.
 	DryRun bool
 	// NoMerge opens the pull request but leaves merging to a person.
 	NoMerge bool
+	// Close names issues a pull request finishes but only references; pr
+	// closes them in its landing commit.
+	Close []string
+	// KeepOpen confirms that the issues a pull request references and does
+	// not close stay open.
+	KeepOpen bool
+	// Since bounds how far back sweep looks for referenced issues that are
+	// still open, in any form git log --since accepts.
+	Since string
 }
 
 // Planned is an issue a landing run will close.
@@ -53,21 +65,7 @@ type Skipped struct {
 // closing in issues. Commits come newest first; each issue is credited to the
 // oldest commit that closes it. A reverted commit closes nothing.
 func Plan(commits []trailers.Commit, issues *beadsfile.File, reason func(trailers.Commit) string) ([]Planned, []Skipped) {
-	var reverted []string
-	for _, c := range commits {
-		if c.Reverts != "" {
-			reverted = append(reverted, c.Reverts)
-		}
-	}
-	isReverted := func(sha string) bool {
-		for _, r := range reverted {
-			if strings.HasPrefix(sha, r) {
-				return true
-			}
-		}
-		return false
-	}
-
+	isReverted := revertedBy(commits)
 	var planned []Planned
 	var skipped []Skipped
 	seen := map[string]bool{}
@@ -91,6 +89,31 @@ func Plan(commits []trailers.Commit, issues *beadsfile.File, reason func(trailer
 		}
 	}
 	return planned, skipped
+}
+
+// revertedBy reports whether a commit is reverted by one of commits, going by
+// git's standard "This reverts commit <sha>." line.
+func revertedBy(commits []trailers.Commit) func(sha string) bool {
+	var reverted []string
+	for _, c := range commits {
+		if c.Reverts != "" {
+			reverted = append(reverted, c.Reverts)
+		}
+	}
+	return func(sha string) bool {
+		for _, r := range reverted {
+			if strings.HasPrefix(sha, r) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func (l *Lander) reportReferenced(refs []Referenced) {
+	for _, r := range refs {
+		l.printf("open  %s  (%s %s): referenced, not closed\n", r.ID, short(r.Commit.SHA), r.Commit.Subject)
+	}
 }
 
 func (l *Lander) printf(format string, args ...any) {
@@ -139,6 +162,22 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 		return fmt.Sprintf("Closed by %s (%s)", short(c.SHA), c.Subject)
 	})
 	l.report(planned, skipped)
+	since := opts.Since
+	if since == "" {
+		since = DefaultSince
+	}
+	recent, err := trailers.Log(ctx, l.Repo, "--since="+since, ref)
+	if err != nil {
+		return err
+	}
+	closing := map[string]bool{}
+	for _, p := range planned {
+		closing[p.ID] = true
+	}
+	if refs := ReferencedOpen(recent, issues, closing); len(refs) > 0 {
+		l.printf("referenced since %s but still open (close them by hand if their work is done):\n", since)
+		l.reportReferenced(refs)
+	}
 	if len(planned) == 0 {
 		l.printf("nothing to close on %s\n", ref)
 		return nil
@@ -222,7 +261,31 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	planned, skipped := Plan(commits, issues, func(c trailers.Commit) string {
 		return fmt.Sprintf("Closed by #%d (%s %s)", number, short(c.SHA), c.Subject)
 	})
+	closing := map[string]bool{}
+	for _, p := range planned {
+		closing[p.ID] = true
+	}
+	for _, id := range opts.Close {
+		iss := issues.Get(id)
+		switch {
+		case iss == nil:
+			return errors.WithNew("--close names an issue that does not exist").Set("id", id).Err()
+		case IsClosed(iss) || closing[id]:
+			continue
+		}
+		closing[id] = true
+		planned = append(planned, Planned{
+			Close:  Close{ID: id, Reason: fmt.Sprintf("Closed at the landing of #%d (--close)", number)},
+			Commit: trailers.Commit{Subject: "--close at landing"},
+		})
+	}
 	l.report(planned, skipped)
+	refs := ReferencedOpen(commits, issues, closing)
+	l.reportReferenced(refs)
+	if len(refs) > 0 && !opts.KeepOpen {
+		return errors.WithNew(fmt.Sprintf("%d issue(s) the PR references would stay open; pass --close <id> for each "+
+			"one it finishes, or --keep-open if it finishes none of them", len(refs))).Err()
+	}
 	if opts.DryRun {
 		return nil
 	}

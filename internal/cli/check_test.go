@@ -69,6 +69,18 @@ func TestCheck_ExplicitRangeAndOptionalTrailers(t *testing.T) {
 	require.Contains(t, out, "names issues that do not exist: t-nope")
 }
 
+func TestCheck_NotesReferencedIssuesWithoutFailing(t *testing.T) {
+	r := testrepo.New(t, "")
+	id := r.Create("task")
+	base := r.Commit("add")
+	r.Write("a.go", "package a\n")
+	r.Commit("feat: a\n\nRefs: " + id)
+
+	code, out := runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "note: "+id+" is referenced")
+}
+
 func TestCheck_BadRevisionIsAnError(t *testing.T) {
 	r := testrepo.New(t, "")
 	code, _ := runCheck(t, r.Dir, "--base", "no-such-rev")

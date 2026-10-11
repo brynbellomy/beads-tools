@@ -68,6 +68,9 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, out io.Writer
 	for _, u := range unlinked {
 		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
 	}
+	for _, r := range ReferencedOpen(commits, issues, nil) {
+		fmt.Fprintf(out, "note: %s is referenced by %s %s but nothing closes it; end the finishing commit with Closes: %s\n", r.ID, short(r.Commit.SHA), r.Commit.Subject, r.ID)
+	}
 	if len(unlinked) == 0 {
 		fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
 		return true, nil
