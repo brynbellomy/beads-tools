@@ -36,10 +36,11 @@ usage:
         writes the result to OURS
   beads-tools hook commit-msg FILE
         check a commit message's Closes:/Refs: trailers
-  beads-tools land pr NUMBER [--dry-run] [--no-merge]
+  beads-tools land pr NUMBER [--dry-run] [--no-merge] [--close ID]... [--keep-open]
         close the issues a pull request's commits close, on its branch,
-        then merge it
-  beads-tools land sweep [--dry-run] [--no-merge]
+        then merge it. issues it only references (Refs:) need a decision:
+        --close each one it finishes, or --keep-open
+  beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN]
         close issues whose closing commits are already on the main branch,
         through a pull request
   beads-tools check [--base REV] [--head REV]
@@ -174,6 +175,16 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 	var opts land.Options
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&opts.NoMerge, "no-merge", false, "push and open, but leave merging to a person")
+	if args[0] == "pr" {
+		fs.Func("close", "close an issue the PR finishes but only references (repeatable)", func(id string) error {
+			opts.Close = append(opts.Close, id)
+			return nil
+		})
+		fs.BoolVar(&opts.KeepOpen, "keep-open", false, "confirm the issues the PR references and does not close stay open")
+	}
+	if args[0] == "sweep" {
+		fs.StringVar(&opts.Since, "since", land.DefaultSince, "how far back to report referenced issues that are still open (git log --since)")
+	}
 
 	l := &land.Lander{
 		Repo:   repo,

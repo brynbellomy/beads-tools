@@ -124,7 +124,7 @@ func TestPR_ClosesOnTheBranchThenMergesThatHead(t *testing.T) {
 	require.Contains(t, r.G("log", "-1", "--format=%B", tip), "Closed by #7")
 }
 
-func TestPR_WithNothingToCloseMergesTheHeadAsIs(t *testing.T) {
+func TestPR_KeepOpenMergesTheHeadAsIs(t *testing.T) {
 	remote := testrepo.NewRemote(t)
 	r := testrepo.New(t, remote)
 	id := r.Create("progress")
@@ -140,7 +140,7 @@ func TestPR_WithNothingToCloseMergesTheHeadAsIs(t *testing.T) {
 	gh.EXPECT().Merge(mock.Anything, "8", head, "merge").Return(nil)
 
 	var out bytes.Buffer
-	require.NoError(t, lander(r, gh, &out).PR(context.Background(), 8, land.Options{}))
+	require.NoError(t, lander(r, gh, &out).PR(context.Background(), 8, land.Options{KeepOpen: true}))
 }
 
 func TestPR_RefusesWhenTheBranchMoved(t *testing.T) {
