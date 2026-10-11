@@ -131,7 +131,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	issues, err := l.issuesAt(ctx, ref)
+	issues, err := issuesAt(ctx, l.Repo, ref)
 	if err != nil {
 		return err
 	}
@@ -203,7 +203,7 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	if err != nil {
 		return err
 	}
-	issues, err := l.issuesAt(ctx, pr.HeadRefOid)
+	issues, err := issuesAt(ctx, l.Repo, pr.HeadRefOid)
 	if err != nil {
 		return err
 	}
@@ -250,8 +250,9 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	return nil
 }
 
-func (l *Lander) issuesAt(ctx context.Context, rev string) (*beadsfile.File, error) {
-	data, ok, err := l.Repo.Show(ctx, rev, beadsfile.Path)
+// issuesAt parses the issues file as of rev.
+func issuesAt(ctx context.Context, repo gitx.Repo, rev string) (*beadsfile.File, error) {
+	data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
 	if err != nil {
 		return nil, err
 	}

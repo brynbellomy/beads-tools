@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/brynbellomy/beads-tools/internal/beadsfile"
@@ -46,6 +47,33 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 		}
 	}
 	return out, nil
+}
+
+// Check applies the landing rules to the commits in base..head against the
+// issues file at head, printing each offender to out. It reports whether every
+// commit may land. It needs only git, so CI can run it.
+func Check(ctx context.Context, repo gitx.Repo, base, head string, out io.Writer) (bool, error) {
+	commits, err := trailers.Log(ctx, repo, base+".."+head)
+	if err != nil {
+		return false, err
+	}
+	issues, err := issuesAt(ctx, repo, head)
+	if err != nil {
+		return false, err
+	}
+	unlinked, err := FindUnlinked(ctx, repo, commits, issues, repo.ConfigBool(ctx, "beadstools.requireTrailers", true))
+	if err != nil {
+		return false, err
+	}
+	for _, u := range unlinked {
+		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
+	}
+	if len(unlinked) == 0 {
+		fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
+		return true, nil
+	}
+	fmt.Fprintf(out, "%d of %d commit(s) do not name a valid issue; reword them to end with a Closes: or Refs: trailer\n", len(unlinked), len(commits))
+	return false, nil
 }
 
 func onlyTouchesBeads(ctx context.Context, repo gitx.Repo, sha string) (bool, error) {

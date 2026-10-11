@@ -42,6 +42,10 @@ usage:
   beads-tools land sweep [--dry-run] [--no-merge]
         close issues whose closing commits are already on the main branch,
         through a pull request
+  beads-tools check [--base REV] [--head REV]
+        apply land pr's trailer rules to base..head (default: the main
+        branch on the remote, and HEAD); exits 1 when a commit fails them.
+        Needs only git, for CI.
 
 git config (all optional):
   beadstools.remote           remote to publish to (origin)
@@ -85,6 +89,26 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err := install.Install(ctx, repo, *bin, stdout); err != nil {
 			fmt.Fprintf(stderr, "beads-tools: %v\n", err)
 			return ExitError
+		}
+		return ExitOK
+	case "check":
+		fs := flag.NewFlagSet("check", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		base := fs.String("base", "", "first excluded revision (default <remote>/<main branch>)")
+		head := fs.String("head", "HEAD", "last revision checked; its issues file is the reference")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
+			return ExitError
+		}
+		if *base == "" {
+			*base = repo.Remote(ctx) + "/" + repo.MainBranch(ctx)
+		}
+		ok, err := land.Check(ctx, repo, *base, *head, stdout)
+		if err != nil {
+			fmt.Fprintf(stderr, "beads-tools: %v\n", err)
+			return ExitError
+		}
+		if !ok {
+			return ExitConflict
 		}
 		return ExitOK
 	case "land":
