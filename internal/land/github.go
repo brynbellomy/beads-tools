@@ -3,7 +3,6 @@ package land
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	"github.com/brynbellomy/go-utils/errors"
@@ -24,7 +23,8 @@ type PR struct {
 
 // GitHub is the pull request host.
 type GitHub interface {
-	View(ctx context.Context, number int) (PR, error)
+	// View reads ref (a number or URL), the same reference Merge takes.
+	View(ctx context.Context, ref string) (PR, error)
 	Create(ctx context.Context, base, head, title, body string) (url string, err error)
 	// Merge merges ref (a number or URL) only if its head is still headSHA.
 	Merge(ctx context.Context, ref, headSHA, method string) error
@@ -36,8 +36,8 @@ type GH struct {
 }
 
 // View implements GitHub.
-func (g GH) View(ctx context.Context, number int) (PR, error) {
-	out, err := gitx.Command(ctx, g.Dir, "gh", "pr", "view", strconv.Itoa(number),
+func (g GH) View(ctx context.Context, ref string) (PR, error) {
+	out, err := gitx.Command(ctx, g.Dir, "gh", "pr", "view", ref,
 		"--json", "number,state,url,baseRefName,headRefName,headRefOid,isCrossRepository")
 	if err != nil {
 		return PR{}, err

@@ -31,7 +31,7 @@ func closingPR(t *testing.T) (*testrepo.Repo, string, string) {
 // in the given state.
 func viewRemote(t *testing.T, gh *mocks.MockGitHub, r *testrepo.Repo, state func() string) {
 	t.Helper()
-	gh.EXPECT().View(mock.Anything, 3).RunAndReturn(func(context.Context, int) (land.PR, error) {
+	gh.EXPECT().View(mock.Anything, "3").RunAndReturn(func(context.Context, string) (land.PR, error) {
 		r.G("fetch", "-q", "origin")
 		return land.PR{Number: 3, State: state(), BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: r.G("rev-parse", "origin/feat/g")}, nil
 	})
@@ -131,4 +131,39 @@ func TestPR_RerunAfterTheClosingCommitWasPushed(t *testing.T) {
 	require.NotContains(t, out.String(), "pushed")
 	r.G("fetch", "-q", "origin")
 	require.Equal(t, pushed, r.G("rev-parse", "origin/feat/g"))
+}
+
+func TestSweep_RetriesAMergeTheBaseBranchRaced(t *testing.T) {
+	remote := testrepo.NewRemote(t)
+	r := testrepo.New(t, remote)
+	id := r.Create("done on main")
+	r.Commit("add issue")
+	r.Write("code.go", "package x\n")
+	r.Commit("feat: the work\n\nCloses: " + id)
+	r.G("push", "-q", "origin", "main")
+
+	const url = "https://example.test/pr/2"
+	const branch = "beads/sweep-20261010-120000"
+	gh := mocks.NewMockGitHub(t)
+	gh.EXPECT().Create(mock.Anything, "main", branch, "beads: close "+id, mock.Anything).Return(url, nil)
+	gh.EXPECT().View(mock.Anything, url).RunAndReturn(func(context.Context, string) (land.PR, error) {
+		r.G("fetch", "-q", "origin")
+		return land.PR{State: "OPEN", BaseRefName: "main", HeadRefName: branch, HeadRefOid: r.G("rev-parse", "origin/"+branch)}, nil
+	})
+	var shas []string
+	gh.EXPECT().Merge(mock.Anything, url, mock.Anything, "merge").
+		Run(func(_ context.Context, _, sha, _ string) { shas = append(shas, sha) }).
+		Return(errBaseModified).Once()
+	gh.EXPECT().Merge(mock.Anything, url, mock.Anything, "merge").
+		Run(func(_ context.Context, _, sha, _ string) { shas = append(shas, sha) }).
+		Return(nil).Once()
+
+	var out bytes.Buffer
+	require.NoError(t, lander(r, gh, &out).Sweep(context.Background(), land.Options{}), out.String())
+
+	require.Len(t, shas, 2)
+	require.Equal(t, shas[0], shas[1], "both attempts are pinned to the pushed head")
+	require.Equal(t, "closed", r.Status(shas[0], id))
+	require.Contains(t, out.String(), "attempt 1 of 4")
+	require.Contains(t, out.String(), "merged "+url)
 }

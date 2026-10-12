@@ -165,7 +165,8 @@ the finishing commit before `land pr` asks.
 **`beads-tools land sweep`** is the backstop for PRs merged some other way,
 such as the GitHub web UI. It finds issues that commits on the main branch
 close but that are still open there, closes them on a fresh branch, opens a
-PR, merges it and deletes the branch. It also lists issues that recent
+PR, merges it (retrying a moving base as `land pr` does) and deletes the
+branch. It also lists issues that recent
 commits on the main branch reference with `Refs:` but that nothing closed
 (`--since`, default two weeks): a PR merged without `land pr` never got
 asked about them, so close the finished ones by hand.

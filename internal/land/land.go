@@ -211,7 +211,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 	if opts.NoMerge {
 		return nil
 	}
-	if err := l.GitHub.Merge(ctx, url, sha, l.mergeMethod(ctx)); err != nil {
+	if err := l.mergePushedHead(ctx, url, sha); err != nil {
 		return err
 	}
 	l.printf("merged %s\n", url)
@@ -225,7 +225,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 // one commit on the PR's own branch, then merges the PR only if that commit is
 // still its head. The work and its closes reach the main branch together.
 func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
-	pr, err := l.GitHub.View(ctx, number)
+	pr, err := l.GitHub.View(ctx, strconv.Itoa(number))
 	if err != nil {
 		return err
 	}
@@ -318,17 +318,18 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	if opts.NoMerge {
 		return nil
 	}
-	if err := l.mergePushedHead(ctx, number, sha); err != nil {
+	if err := l.mergePushedHead(ctx, strconv.Itoa(number), sha); err != nil {
 		return err
 	}
 	l.printf("merged #%d\n", number)
 	return nil
 }
 
-// mergePushedHead merges pull request number pinned to sha. GitHub refuses a
-// merge while the base branch moves under it, so a refusal re-reads the pull
-// request and retries, a bounded number of times, while sha is still its head.
-func (l *Lander) mergePushedHead(ctx context.Context, number int, sha string) error {
+// mergePushedHead merges pull request ref (a number or URL) pinned to sha.
+// GitHub refuses a merge while the base branch moves under it, so a refusal
+// re-reads the pull request and retries, a bounded number of times, while sha
+// is still its head.
+func (l *Lander) mergePushedHead(ctx context.Context, ref, sha string) error {
 	method := l.mergeMethod(ctx)
 	var mergeErr error
 	for attempt := 1; attempt <= mergeAttempts; attempt++ {
@@ -337,26 +338,26 @@ func (l *Lander) mergePushedHead(ctx context.Context, number int, sha string) er
 				return errors.With(err, "waiting to retry the merge").Err()
 			}
 		}
-		mergeErr = l.GitHub.Merge(ctx, strconv.Itoa(number), sha, method)
+		mergeErr = l.GitHub.Merge(ctx, ref, sha, method)
 		if mergeErr == nil {
 			return nil
 		}
-		pr, err := l.GitHub.View(ctx, number)
+		pr, err := l.GitHub.View(ctx, ref)
 		if err != nil {
-			return errors.With(mergeErr, "merging pull request").Set("number", number, "view_error", err.Error()).Err()
+			return errors.With(mergeErr, "merging pull request").Set("pr", ref, "view_error", err.Error()).Err()
 		}
 		switch {
 		case pr.HeadRefOid != sha:
 			return errors.With(mergeErr, "the branch moved after its head was pushed; land again").
-				Set("number", number, "pushed", sha, "head", pr.HeadRefOid).Err()
+				Set("pr", ref, "pushed", sha, "head", pr.HeadRefOid).Err()
 		case pr.State == "MERGED":
 			return nil
 		case pr.State != "OPEN":
-			return errors.With(mergeErr, "pull request is no longer open").Set("number", number, "state", pr.State).Err()
+			return errors.With(mergeErr, "pull request is no longer open").Set("pr", ref, "state", pr.State).Err()
 		}
-		l.printf("merge of #%d refused (attempt %d of %d): %v\n", number, attempt, mergeAttempts, mergeErr)
+		l.printf("merge of %s refused (attempt %d of %d): %v\n", ref, attempt, mergeAttempts, mergeErr)
 	}
-	return errors.With(mergeErr, "merging pull request").Set("number", number, "attempts", mergeAttempts).Err()
+	return errors.With(mergeErr, "merging pull request").Set("pr", ref, "attempts", mergeAttempts).Err()
 }
 
 func pause(ctx context.Context, d time.Duration) error {

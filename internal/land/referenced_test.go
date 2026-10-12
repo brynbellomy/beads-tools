@@ -32,7 +32,7 @@ func refsRepo(t *testing.T) (r *testrepo.Repo, task, epic, head string) {
 
 func viewPR4(t *testing.T, head string) *mocks.MockGitHub {
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 4).Return(land.PR{Number: 4, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/r", HeadRefOid: head}, nil)
+	gh.EXPECT().View(mock.Anything, "4").Return(land.PR{Number: 4, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/r", HeadRefOid: head}, nil)
 	return gh
 }
 

@@ -201,8 +201,8 @@ func (_c *MockGitHub_Merge_Call) RunAndReturn(run func(ctx context.Context, ref 
 }
 
 // View provides a mock function for the type MockGitHub
-func (_mock *MockGitHub) View(ctx context.Context, number int) (land.PR, error) {
-	ret := _mock.Called(ctx, number)
+func (_mock *MockGitHub) View(ctx context.Context, ref string) (land.PR, error) {
+	ret := _mock.Called(ctx, ref)
 
 	if len(ret) == 0 {
 		panic("no return value specified for View")
@@ -210,16 +210,16 @@ func (_mock *MockGitHub) View(ctx context.Context, number int) (land.PR, error) 
 
 	var r0 land.PR
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int) (land.PR, error)); ok {
-		return returnFunc(ctx, number)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (land.PR, error)); ok {
+		return returnFunc(ctx, ref)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, int) land.PR); ok {
-		r0 = returnFunc(ctx, number)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) land.PR); ok {
+		r0 = returnFunc(ctx, ref)
 	} else {
 		r0 = ret.Get(0).(land.PR)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, int) error); ok {
-		r1 = returnFunc(ctx, number)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, ref)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -233,20 +233,20 @@ type MockGitHub_View_Call struct {
 
 // View is a helper method to define mock.On call
 //   - ctx context.Context
-//   - number int
-func (_e *MockGitHub_Expecter) View(ctx any, number any) *MockGitHub_View_Call {
-	return &MockGitHub_View_Call{Call: _e.mock.On("View", ctx, number)}
+//   - ref string
+func (_e *MockGitHub_Expecter) View(ctx any, ref any) *MockGitHub_View_Call {
+	return &MockGitHub_View_Call{Call: _e.mock.On("View", ctx, ref)}
 }
 
-func (_c *MockGitHub_View_Call) Run(run func(ctx context.Context, number int)) *MockGitHub_View_Call {
+func (_c *MockGitHub_View_Call) Run(run func(ctx context.Context, ref string)) *MockGitHub_View_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 int
+		var arg1 string
 		if args[1] != nil {
-			arg1 = args[1].(int)
+			arg1 = args[1].(string)
 		}
 		run(
 			arg0,
@@ -261,7 +261,7 @@ func (_c *MockGitHub_View_Call) Return(pR land.PR, err error) *MockGitHub_View_C
 	return _c
 }
 
-func (_c *MockGitHub_View_Call) RunAndReturn(run func(ctx context.Context, number int) (land.PR, error)) *MockGitHub_View_Call {
+func (_c *MockGitHub_View_Call) RunAndReturn(run func(ctx context.Context, ref string) (land.PR, error)) *MockGitHub_View_Call {
 	_c.Call.Return(run)
 	return _c
 }

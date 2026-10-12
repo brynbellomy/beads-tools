@@ -30,7 +30,7 @@ func prRepo(t *testing.T, build func(r *testrepo.Repo, id string)) (*testrepo.Re
 
 func viewOnly(t *testing.T, head string) *mocks.MockGitHub {
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 3).Return(land.PR{Number: 3, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: head}, nil)
+	gh.EXPECT().View(mock.Anything, "3").Return(land.PR{Number: 3, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: head}, nil)
 	return gh
 }
 
