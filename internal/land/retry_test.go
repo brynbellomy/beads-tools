@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -27,13 +28,20 @@ func closingPR(t *testing.T) (*testrepo.Repo, string, string) {
 	return r, id, head
 }
 
+// remoteTip reads branch on the remote without updating the clone's
+// remote-tracking refs, which land must fetch itself.
+func remoteTip(r *testrepo.Repo, branch string) string {
+	fields := strings.Fields(r.G("ls-remote", "origin", "refs/heads/"+branch))
+	require.NotEmpty(r.T, fields)
+	return fields[0]
+}
+
 // viewRemote answers View with the branch tip on the remote, as GitHub would,
 // in the given state.
 func viewRemote(t *testing.T, gh *mocks.MockGitHub, r *testrepo.Repo, state func() string) {
 	t.Helper()
 	gh.EXPECT().View(mock.Anything, "3").RunAndReturn(func(context.Context, string) (land.PR, error) {
-		r.G("fetch", "-q", "origin")
-		return land.PR{Number: 3, State: state(), BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: r.G("rev-parse", "origin/feat/g")}, nil
+		return land.PR{Number: 3, State: state(), BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: remoteTip(r, "feat/g")}, nil
 	})
 }
 
@@ -147,8 +155,7 @@ func TestSweep_RetriesAMergeTheBaseBranchRaced(t *testing.T) {
 	gh := mocks.NewMockGitHub(t)
 	gh.EXPECT().Create(mock.Anything, "main", branch, "beads: close "+id, mock.Anything).Return(url, nil)
 	gh.EXPECT().View(mock.Anything, url).RunAndReturn(func(context.Context, string) (land.PR, error) {
-		r.G("fetch", "-q", "origin")
-		return land.PR{State: "OPEN", BaseRefName: "main", HeadRefName: branch, HeadRefOid: r.G("rev-parse", "origin/"+branch)}, nil
+		return land.PR{State: "OPEN", BaseRefName: "main", HeadRefName: branch, HeadRefOid: remoteTip(r, branch)}, nil
 	})
 	var shas []string
 	var moved string
