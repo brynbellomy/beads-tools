@@ -14,7 +14,7 @@ import (
 	"github.com/brynbellomy/beads-tools/internal/testrepo"
 )
 
-var errBaseModified = errors.New("GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)")
+var errBaseModified = errors.Join(land.ErrBaseModified, errors.New("GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)"))
 
 // closingPR pushes main with one issue and branch feat/r whose commit closes
 // it. It returns the repo, the issue and the branch head.
@@ -151,8 +151,12 @@ func TestSweep_RetriesAMergeTheBaseBranchRaced(t *testing.T) {
 		return land.PR{State: "OPEN", BaseRefName: "main", HeadRefName: branch, HeadRefOid: r.G("rev-parse", "origin/"+branch)}, nil
 	})
 	var shas []string
+	var moved string
 	gh.EXPECT().Merge(mock.Anything, url, mock.Anything, "merge").
-		Run(func(_ context.Context, _, sha, _ string) { shas = append(shas, sha) }).
+		Run(func(_ context.Context, _, sha, _ string) {
+			shas = append(shas, sha)
+			moved = pushToMain(t, r, "other.go", "package other\n")
+		}).
 		Return(errBaseModified).Once()
 	gh.EXPECT().Merge(mock.Anything, url, mock.Anything, "merge").
 		Run(func(_ context.Context, _, sha, _ string) { shas = append(shas, sha) }).
@@ -162,8 +166,9 @@ func TestSweep_RetriesAMergeTheBaseBranchRaced(t *testing.T) {
 	require.NoError(t, lander(r, gh, &out).Sweep(context.Background(), land.Options{}), out.String())
 
 	require.Len(t, shas, 2)
-	require.Equal(t, shas[0], shas[1], "both attempts are pinned to the pushed head")
-	require.Equal(t, "closed", r.Status(shas[0], id))
+	require.True(t, isAncestor(r, moved, shas[1]), "the retry merges a head that contains the moved base")
+	require.True(t, isAncestor(r, shas[0], shas[1]), "the retried head builds on the pushed one")
+	require.Equal(t, "closed", r.Status(shas[1], id))
 	require.Contains(t, out.String(), "attempt 1 of 4")
 	require.Contains(t, out.String(), "merged "+url)
 }

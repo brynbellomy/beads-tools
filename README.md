@@ -117,18 +117,30 @@ The association is the commits themselves, so nothing is tracked anywhere
 else: an issue that is already closed is the watermark, and every run is
 idempotent.
 
-**`beads-tools land pr N`** is the normal path. It reads the `Closes:`
-trailers on the PR's commits, adds one commit to the PR's branch that closes
-those issues, pushes it (a plain push, which fails if anyone pushed
-meanwhile) and merges the PR with `gh pr merge --match-head-commit`. The work
-and its closes reach the main branch in the same merge.
+**`beads-tools land pr N`** is the normal path. In a throwaway worktree it
+first brings the PR's head up to date with the base branch: when the head
+does not contain the base, it merges the base into the head, with this
+tool's merge driver handling the issues file whatever the repository's own
+git config says. It then applies the landing rules to that head, adds one
+commit that closes the issues the PR's `Closes:` trailers name, pushes the
+result to the PR's branch (a plain push, which fails if anyone pushed
+meanwhile) and merges the PR with `gh pr merge --match-head-commit`. GitHub
+merges server-side without custom merge drivers, but because the head
+already contains the base, its merge takes the head's issues file as it is.
+The work and its closes reach the main branch in the same merge. A merge
+conflict outside `.beads/` while bringing the head up to date stops the
+landing; merge the base by hand, push, and land again.
 
 GitHub refuses a merge while the base branch moves under it ("Base branch was
-modified"). When a merge fails, `land pr` reads the PR again: if its head is
-still the commit `land pr` pushed, it waits and retries, up to four attempts
-in all; if the PR merged anyway, it is done; if the branch moved, it stops.
-A rerun after a failed merge finds the issues already closed on the branch,
-pushes nothing, and merges the head as it is.
+modified"). On that refusal, while the PR's head is still the commit `land
+pr` pushed, it waits, fetches the base again, brings the head up to date with
+it through the driver, checks the result and pushes it, then retries the
+merge on that new head, up to four attempts in all. It never retries a merge
+against a stale base. If the PR merged anyway it is done; if the branch moved
+or the PR is no longer open it stops. Any other refusal, such as failing
+checks or missing permissions, stops at once. A rerun after a failed merge
+finds the issues already closed on the branch, pushes nothing new, and
+merges the head as it is.
 
 An issue the PR's commits name only with `Refs:` would stay open after the
 merge, so `land pr` asks for a decision instead of guessing. It lists each
@@ -171,8 +183,8 @@ the finishing commit before `land pr` asks.
 **`beads-tools land sweep`** is the backstop for PRs merged some other way,
 such as the GitHub web UI. It finds issues that commits on the main branch
 close but that are still open there, closes them on a fresh branch, opens a
-PR, merges it (retrying a moving base as `land pr` does) and deletes the
-branch. It also lists issues that recent
+PR, merges it (bringing its branch up to date and retrying when the base
+moves, as `land pr` does) and deletes the branch. It also lists issues that recent
 commits on the main branch reference with `Refs:` but that nothing closed
 (`--since`, default two weeks): a PR merged without `land pr` never got
 asked about them, so close the finished ones by hand.

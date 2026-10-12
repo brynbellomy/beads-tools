@@ -194,6 +194,11 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 		fs.StringVar(&opts.Since, "since", land.DefaultSince, "how far back to report referenced issues that are still open (git log --since)")
 	}
 
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "beads-tools: locating own binary: %v\n", err)
+		return ExitError
+	}
 	l := &land.Lander{
 		Repo:   repo,
 		GitHub: land.GH{Dir: repo.Dir},
@@ -202,8 +207,8 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 		Now:    time.Now,
 
 		MergeRetryDelay: 5 * time.Second,
+		MergeDriver:     land.DriverCommand(self),
 	}
-	var err error
 	switch args[0] {
 	case "pr":
 		if len(args) < 2 {

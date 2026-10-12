@@ -24,6 +24,8 @@ func lander(r *testrepo.Repo, gh land.GitHub, out *bytes.Buffer) *land.Lander {
 		Beads:  land.BR{},
 		Out:    out,
 		Now:    func() time.Time { return time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC) },
+
+		MergeDriver: driver,
 	}
 }
 
