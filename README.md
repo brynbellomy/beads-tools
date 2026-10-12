@@ -106,7 +106,9 @@ same commit counts). Off the main branch it also requires at least one
 trailer, except for commits that change only `.beads/`, merges, and
 `fixup!`/`squash!`/`amend!` commits. A commit that changes the issues file,
 merges included, is rejected when the staged file holds a comment ID more
-than once, since br refuses to import such a file. Set `BEADS_TOOLS_SKIP=1`
+than once, since br refuses to import such a file, unless a parent of the
+commit (HEAD, or the branch being merged) already holds that same ID on the
+same issues: merging a branch that carries duplicates is not blocked. Set `BEADS_TOOLS_SKIP=1`
 to skip the checks for one commit.
 
 ## Closing issues when work lands

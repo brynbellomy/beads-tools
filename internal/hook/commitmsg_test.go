@@ -2,6 +2,7 @@ package hook_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,4 +112,60 @@ func TestCommitMsg_RefusesStagedDuplicateCommentIDs(t *testing.T) {
 
 	t.Setenv(hook.SkipEnv, "1")
 	require.NoError(t, check(t, r, "feat: x\n\nCloses: "+id+"\n"))
+}
+
+func dupRows(id int, a, b string) string {
+	row := func(issue string) string {
+		return fmt.Sprintf(`{"id":"%s","title":"%s","comments":[{"id":%d,"issue_id":"%s","author":"x","text":"n","created_at":"2026-01-01T00:00:00Z"}]}`, issue, issue, id, issue)
+	}
+	return row(a) + "\n" + row(b) + "\n"
+}
+
+func appendIssues(t *testing.T, r *testrepo.Repo, rows string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(r.Dir, ".beads", "issues.jsonl"))
+	require.NoError(t, err)
+	r.Write(".beads/issues.jsonl", string(data)+rows)
+}
+
+// mainWithDuplicates gives main a duplicate comment id after feat/x forked,
+// then starts merging main into feat/x without committing.
+func mainWithDuplicates(t *testing.T) *testrepo.Repo {
+	t.Helper()
+	r := testrepo.New(t, "")
+	r.Create("work")
+	r.Commit("add issue")
+	r.G("branch", "feat/x")
+	appendIssues(t, r, dupRows(7, "t-da", "t-db"))
+	r.Commit("beads: import with a duplicate")
+	r.G("checkout", "-q", "feat/x")
+	r.Write("x.go", "package x\n")
+	r.Commit("feat: x")
+	r.G("-c", "core.hooksPath=/dev/null", "merge", "-q", "--no-commit", "--no-ff", "main")
+	return r
+}
+
+func TestCommitMsg_MergeThatInheritsDuplicatesPasses(t *testing.T) {
+	r := mainWithDuplicates(t)
+	require.NoError(t, check(t, r, "Merge branch 'main' into feat/x\n"))
+}
+
+func TestCommitMsg_MergeThatAddsADuplicateFails(t *testing.T) {
+	r := mainWithDuplicates(t)
+	appendIssues(t, r, dupRows(9, "t-dc", "t-dd"))
+	r.G("add", ".beads/issues.jsonl")
+	err := check(t, r, "Merge branch 'main' into feat/x\n")
+	require.ErrorContains(t, err, "comment id 9 is used 2 times (t-dc, t-dd)")
+	require.NotContains(t, err.Error(), "comment id 7", "the inherited duplicate is not reported")
+}
+
+func TestCommitMsg_CommitOnTopOfInheritedDuplicatesPasses(t *testing.T) {
+	r := testrepo.New(t, "")
+	id := r.Create("work")
+	appendIssues(t, r, dupRows(7, "t-da", "t-db"))
+	r.Commit("beads: import with a duplicate")
+	r.G("checkout", "-q", "-b", "feat/y")
+	appendIssues(t, r, `{"id":"t-new","title":"another"}`+"\n")
+	r.G("add", ".beads/issues.jsonl")
+	require.NoError(t, check(t, r, "beads: file another\n\nRefs: "+id+"\n"))
 }
