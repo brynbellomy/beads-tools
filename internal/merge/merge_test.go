@@ -332,7 +332,8 @@ func TestMerge_AddedCommentThatCollidesIsRenumberedAboveEveryInput(t *testing.T)
 }
 
 // Minimized from sirene's merge e813e2978: ours carried the duplicates an
-// earlier merge introduced. The comment that held the id in base keeps it.
+// earlier merge introduced. The comment that held the id in base keeps it, and
+// the copy that took it falls back to the id base gave it.
 func TestMerge_OutputNeverHoldsADuplicateCommentID(t *testing.T) {
 	base := file(t, bulkA, bulkB)
 	corrupt := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":162,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
@@ -343,5 +344,74 @@ func TestMerge_OutputNeverHoldsADuplicateCommentID(t *testing.T) {
 
 	requireUniqueCommentIDs(t, out)
 	require.Contains(t, out, bulkB+"\n", "t-b held 162 in base and keeps it")
-	require.Equal(t, []merge.Renumber{{IssueID: "t-a", Old: 162, New: 820}}, rep.Renumbers)
+	require.Contains(t, out, bulkA+"\n", "t-a takes back base's 819")
+	require.Empty(t, rep.Renumbers)
+}
+
+// Without an id a side holds to fall back to, a duplicate an input carries
+// gets a fresh id.
+func TestMerge_DuplicateWithNoOtherIDGetsAFreshOne(t *testing.T) {
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, bulkB, x)
+	dupOnX := `{"id":"t-x","title":"x","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":162,"issue_id":"t-x","author":"o","text":"new","created_at":"2026-01-02T00:00:00Z"}]}`
+	ours := file(t, bulkB, dupOnX)
+	theirs := file(t, bulkB, x)
+
+	out, rep := run(t, base, ours, theirs)
+
+	requireUniqueCommentIDs(t, out)
+	require.Contains(t, out, bulkB+"\n")
+	require.Equal(t, []merge.Renumber{{IssueID: "t-x", Old: 162, New: 163}}, rep.Renumbers)
+}
+
+// Found in review: main repaired a duplicate id, and a branch forked before the
+// repair merges main. The renumbering only theirs made survives.
+func TestMerge_OneSidedCommentIDChangeSurvives(t *testing.T) {
+	a := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":5,"issue_id":"t-a","author":"x","text":"one","created_at":"2026-01-01T00:00:00Z"}]}`
+	b := `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":5,"issue_id":"t-b","author":"x","text":"two","created_at":"2026-01-01T00:00:00Z"}]}`
+	bRepaired := `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":9,"issue_id":"t-b","author":"x","text":"two","created_at":"2026-01-01T00:00:00Z"}]}`
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, a, b, x)
+	ours := file(t, a, b, `{"id":"t-x","title":"x","priority":1,"updated_at":"2026-01-02T00:00:00Z"}`)
+	theirs := file(t, a, bRepaired, `{"id":"t-x","title":"x","assignee":"z","updated_at":"2026-01-03T00:00:00Z"}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Contains(t, out, a+"\n")
+	require.Contains(t, out, bRepaired+"\n")
+	require.Empty(t, rep.Renumbers)
+	requireUniqueCommentIDs(t, out)
+}
+
+func TestMerge_IdenticalCommentsWithinOneIssueKeepTheirIDs(t *testing.T) {
+	a := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"},{"id":8,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}]}`
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, a, x)
+	ours := file(t, a, `{"id":"t-x","title":"x","priority":1,"updated_at":"2026-01-02T00:00:00Z"}`)
+	theirs := file(t, a, `{"id":"t-x","title":"x","assignee":"z","updated_at":"2026-01-03T00:00:00Z"}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Contains(t, out, a+"\n")
+	require.Empty(t, rep.Renumbers)
+}
+
+func TestMerge_RenumberingClearsTheirsMaxID(t *testing.T) {
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	y := `{"id":"t-y","title":"y","updated_at":"2026-01-01T00:00:00Z"}`
+	z := `{"id":"t-z","title":"z","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, x, y, z)
+	ours := file(t,
+		`{"id":"t-x","title":"x","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":3,"issue_id":"t-x","author":"o","text":"ours","created_at":"2026-01-02T00:00:00Z"}]}`,
+		y,
+		`{"id":"t-z","title":"z","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":40,"issue_id":"t-z","author":"o","text":"ours too","created_at":"2026-01-02T00:00:00Z"}]}`)
+	theirs := file(t, x,
+		`{"id":"t-y","title":"y","updated_at":"2026-01-03T00:00:00Z","comments":[{"id":3,"issue_id":"t-y","author":"t","text":"theirs","created_at":"2026-01-03T00:00:00Z"},{"id":60,"issue_id":"t-y","author":"t","text":"later","created_at":"2026-01-03T00:00:01Z"}]}`,
+		`{"id":"t-z","title":"z","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":40,"issue_id":"t-z","author":"o","text":"ours too","created_at":"2026-01-02T00:00:00Z"}]}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Equal(t, []int64{61, 60}, commentIDs(t, issue(t, out, "t-y")), "theirs' colliding comment moves above theirs' own 60")
+	require.Equal(t, []merge.Renumber{{IssueID: "t-y", Old: 3, New: 61}}, rep.Renumbers)
+	requireUniqueCommentIDs(t, out)
 }

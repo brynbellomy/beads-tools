@@ -63,11 +63,15 @@ issue by issue, field by field:
 - Comment IDs stay unique across the whole file, as br requires. A comment
   is matched across sides within its own issue, since one note posted on
   several issues in the same second has the same author, time and text on
-  each. A comment ours has keeps ours' ID, and a comment that carries the ID
-  base gave it keeps it. A comment whose ID a different comment already
-  holds, such as one each side added from its own counter, gets the next ID
-  above every ID in base, ours and theirs, and the renumbering is printed.
-  The same rule repairs duplicate IDs an input already carries.
+  each; identical comments within one issue are matched in file order. Each
+  comment's ID merges three-way: the side that changed it from base wins,
+  and ours wins when both did. IDs are then claimed in order: comments that
+  carry base's ID for them first, then comments base or ours already had,
+  then comments only theirs added. A comment whose ID a different comment
+  already holds takes another ID one of the sides holds for it, if that one
+  is free, and otherwise the next ID above every ID in base, ours and
+  theirs; that renumbering is printed. The same rule repairs duplicate IDs
+  an input already carries.
 - Lines the merge did not change keep their exact bytes. Output is sorted by
   ID, as br exports it.
 
