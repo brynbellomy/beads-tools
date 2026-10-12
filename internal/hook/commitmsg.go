@@ -22,14 +22,19 @@ const SkipEnv = "BEADS_TOOLS_SKIP"
 // skippedSubjects are commits git or a person generates mechanically.
 var skippedSubjects = []string{"Merge ", "fixup!", "squash!", "amend!", "Revert \""}
 
-// CommitMsg checks the commit message in msgPath. Every ID a Closes or Refs
-// trailer names must exist in the working tree's issues file, so an issue
-// created for this commit counts. When beadstools.requireTrailers is on (the
-// default), a commit off the main branch that changes more than .beads/ must
-// name at least one issue. A repository without an issues file is left alone.
+// CommitMsg checks the commit message in msgPath. A commit that changes the
+// issues file, merges included, must not leave a comment id in it twice. Every
+// ID a Closes or Refs trailer names must exist in the working tree's issues
+// file, so an issue created for this commit counts. When
+// beadstools.requireTrailers is on (the default), a commit off the main branch
+// that changes more than .beads/ must name at least one issue. A repository
+// without an issues file is left alone.
 func CommitMsg(ctx context.Context, repo gitx.Repo, msgPath string) error {
 	if os.Getenv(SkipEnv) == "1" {
 		return nil
+	}
+	if err := checkStagedCommentIDs(ctx, repo); err != nil {
+		return err
 	}
 	top, err := repo.TopLevel(ctx)
 	if err != nil {
@@ -122,4 +127,37 @@ func stagedOnlyBeads(ctx context.Context, repo gitx.Repo) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// checkStagedCommentIDs fails when the commit changes the issues file and the
+// staged version holds a comment id more than once, which br refuses to import.
+func checkStagedCommentIDs(ctx context.Context, repo gitx.Repo) error {
+	out, err := repo.Run(ctx, "diff", "--cached", "--name-only", "--", beadsfile.Path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	data, ok, err := repo.Show(ctx, "", beadsfile.Path)
+	if err != nil || !ok {
+		return err
+	}
+	issues, err := beadsfile.Parse(strings.NewReader(data))
+	if err != nil {
+		return errors.With(err, "reading staged issues file").Err()
+	}
+	dups, err := issues.DuplicateCommentIDs()
+	if err != nil {
+		return err
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+	lines := make([]string, len(dups))
+	for i, d := range dups {
+		lines[i] = "    " + d.String()
+	}
+	return errors.WithNew(fmt.Sprintf("the staged %s holds duplicate comment ids, which br refuses to import:\n%s\n"+
+		"Renumber all but one comment for each id.", beadsfile.Path, strings.Join(lines, "\n"))).Err()
 }

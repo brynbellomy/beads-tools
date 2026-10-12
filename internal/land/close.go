@@ -125,6 +125,13 @@ func CloseInTree(ctx context.Context, root string, closes []Close, beads Beads) 
 	if err != nil {
 		return nil, err
 	}
+	dups, err := f.DuplicateCommentIDs()
+	if err != nil {
+		return nil, err
+	}
+	if len(dups) > 0 {
+		return nil, errors.WithNew("closing would leave a duplicate comment id").Set("duplicate", dups[0].String()).Err()
+	}
 	if err := f.WriteFile(path); err != nil {
 		return nil, err
 	}

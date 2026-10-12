@@ -92,3 +92,23 @@ func TestCommitMsg_RepoWithoutBeadsIsLeftAlone(t *testing.T) {
 	r.G("add", "z.go")
 	require.NoError(t, check(t, r, "feat: z\n"))
 }
+
+func TestCommitMsg_RefusesStagedDuplicateCommentIDs(t *testing.T) {
+	r, id := featureRepo(t)
+	path := filepath.Join(r.Dir, ".beads", "issues.jsonl")
+	clean, err := os.ReadFile(path)
+	require.NoError(t, err)
+	dups := `{"id":"t-da","title":"a","comments":[{"id":7,"issue_id":"t-da","author":"x","text":"n","created_at":"2026-01-01T00:00:00Z"}]}` + "\n" +
+		`{"id":"t-db","title":"b","comments":[{"id":7,"issue_id":"t-db","author":"x","text":"n","created_at":"2026-01-01T00:00:00Z"}]}` + "\n"
+	r.Write(".beads/issues.jsonl", string(clean)+dups)
+
+	require.NoError(t, check(t, r, "feat: x\n\nCloses: "+id+"\n"), "duplicates the commit does not stage are not its business")
+
+	r.G("add", ".beads/issues.jsonl")
+	err = check(t, r, "feat: x\n\nCloses: "+id+"\n")
+	require.ErrorContains(t, err, "comment id 7 is used 2 times (t-da, t-db)")
+	require.ErrorContains(t, check(t, r, "Merge branch 'main' into feat/x\n"), "duplicate comment ids", "merges are checked too")
+
+	t.Setenv(hook.SkipEnv, "1")
+	require.NoError(t, check(t, r, "feat: x\n\nCloses: "+id+"\n"))
+}

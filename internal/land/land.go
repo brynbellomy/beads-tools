@@ -26,7 +26,13 @@ type Lander struct {
 	Beads  Beads
 	Out    io.Writer
 	Now    func() time.Time
+	// MergeRetryDelay is the wait before the first retry of a refused merge;
+	// each later retry waits one delay longer.
+	MergeRetryDelay time.Duration
 }
+
+// mergeAttempts bounds how often pr tries to merge a head it pushed.
+const mergeAttempts = 4
 
 // DefaultSince is how far back sweep reports referenced issues that are still open.
 const DefaultSince = "2 weeks ago"
@@ -43,6 +49,9 @@ type Options struct {
 	// KeepOpen confirms that the issues a pull request references and does
 	// not close stay open.
 	KeepOpen bool
+	// TrailersOptional lets pr land commits that name no issue. Trailers that
+	// name a missing issue still refuse the landing.
+	TrailersOptional bool
 	// Since bounds how far back sweep looks for referenced issues that are
 	// still open, in any form git log --since accepts.
 	Since string
@@ -246,8 +255,11 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	if err != nil {
 		return err
 	}
-	unlinked, err := FindUnlinked(ctx, l.Repo, commits, issues, l.Repo.ConfigBool(ctx, "beadstools.requireTrailers", true))
+	unlinked, err := FindUnlinked(ctx, l.Repo, commits, issues, !opts.TrailersOptional)
 	if err != nil {
+		return err
+	}
+	if err := l.refuseDuplicateCommentIDs(issues, pr.HeadRefName); err != nil {
 		return err
 	}
 	if len(unlinked) > 0 {
@@ -306,11 +318,76 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	if opts.NoMerge {
 		return nil
 	}
-	if err := l.GitHub.Merge(ctx, strconv.Itoa(number), sha, l.mergeMethod(ctx)); err != nil {
+	if err := l.mergePushedHead(ctx, number, sha); err != nil {
 		return err
 	}
 	l.printf("merged #%d\n", number)
 	return nil
+}
+
+// mergePushedHead merges pull request number pinned to sha. GitHub refuses a
+// merge while the base branch moves under it, so a refusal re-reads the pull
+// request and retries, a bounded number of times, while sha is still its head.
+func (l *Lander) mergePushedHead(ctx context.Context, number int, sha string) error {
+	method := l.mergeMethod(ctx)
+	var mergeErr error
+	for attempt := 1; attempt <= mergeAttempts; attempt++ {
+		if attempt > 1 {
+			if err := pause(ctx, time.Duration(attempt-1)*l.MergeRetryDelay); err != nil {
+				return errors.With(err, "waiting to retry the merge").Err()
+			}
+		}
+		mergeErr = l.GitHub.Merge(ctx, strconv.Itoa(number), sha, method)
+		if mergeErr == nil {
+			return nil
+		}
+		pr, err := l.GitHub.View(ctx, number)
+		if err != nil {
+			return errors.With(mergeErr, "merging pull request").Set("number", number, "view_error", err.Error()).Err()
+		}
+		switch {
+		case pr.HeadRefOid != sha:
+			return errors.With(mergeErr, "the branch moved after its head was pushed; land again").
+				Set("number", number, "pushed", sha, "head", pr.HeadRefOid).Err()
+		case pr.State == "MERGED":
+			return nil
+		case pr.State != "OPEN":
+			return errors.With(mergeErr, "pull request is no longer open").Set("number", number, "state", pr.State).Err()
+		}
+		l.printf("merge of #%d refused (attempt %d of %d): %v\n", number, attempt, mergeAttempts, mergeErr)
+	}
+	return errors.With(mergeErr, "merging pull request").Set("number", number, "attempts", mergeAttempts).Err()
+}
+
+func pause(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// refuseDuplicateCommentIDs fails when issues holds a comment id more than
+// once, which br refuses to import.
+func (l *Lander) refuseDuplicateCommentIDs(issues *beadsfile.File, where string) error {
+	dups, err := issues.DuplicateCommentIDs()
+	if err != nil {
+		return err
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+	for _, d := range dups {
+		l.printf("refuse %s: %s\n", where, d)
+	}
+	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s); br refuses to import it. "+
+		"Renumber all but one comment for each id (the merge driver does this when it merges the branch again) and push", where, len(dups))).Err()
 }
 
 // issuesAt parses the issues file as of rev.
