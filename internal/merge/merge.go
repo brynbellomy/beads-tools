@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -517,9 +518,23 @@ func renameCollisions(base, ours, theirs *beadsfile.File, rep *Report) (*beadsfi
 }
 
 // commentKey names one comment within one issue. Identity alone is not enough:
-// br users post the same text on several issues in the same second.
+// br users post the same text on several issues in the same second, and nth
+// tells apart identical comments within one issue, in file order.
 type commentKey struct {
 	issue, identity string
+	nth             int
+}
+
+// commentKeys names each comment of one issue.
+func commentKeys(issue string, cs []*beadsfile.Object) []commentKey {
+	seen := map[string]int{}
+	keys := make([]commentKey, len(cs))
+	for i, c := range cs {
+		ident := commentIdentity(c)
+		keys[i] = commentKey{issue: issue, identity: ident, nth: seen[ident]}
+		seen[ident]++
+	}
+	return keys
 }
 
 // commentRank orders claims on a comment id; a lower rank claims first.
@@ -529,8 +544,8 @@ const (
 	// rankBase: the comment carries the id base gave it, so an issue line
 	// neither side changed never loses an id.
 	rankBase commentRank = iota
-	// rankOurs: the comment carries ours' id for it.
-	rankOurs
+	// rankKept: a comment base or ours has, carrying the id a side gave it.
+	rankKept
 	// rankAdded: the comment came from theirs alone.
 	rankAdded
 )
@@ -538,15 +553,19 @@ const (
 type commentSlot struct {
 	issue int
 	obj   *beadsfile.Object
-	key   commentKey
 	want  int64
-	rank  commentRank
+	// alts are the other ids the sides hold for this comment (ours, base,
+	// theirs order), taken before a fresh id when want is already claimed.
+	alts []int64
+	rank commentRank
 }
 
 // assignCommentIDs makes comment ids in out unique across the file, as br
-// requires. A comment ours has takes ours' id for it; claims then go in rank
-// order, and a comment whose id is already claimed by a different comment gets
-// the next id above every id in base, ours and theirs.
+// requires. Each comment's id merges three-way: a side that changed it from
+// base wins, and ours wins when both did. Claims then go in rank order. A
+// comment whose id is already claimed by a different comment takes another id
+// a side holds for it, else the next id above every id in base, ours and
+// theirs.
 func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue, rep *Report) error {
 	baseIDs, maxBase, err := commentIDs(base)
 	if err != nil {
@@ -556,7 +575,7 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 	if err != nil {
 		return err
 	}
-	_, maxTheirs, err := commentIDs(theirs)
+	theirsIDs, maxTheirs, err := commentIDs(theirs)
 	if err != nil {
 		return err
 	}
@@ -570,20 +589,40 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 			return errors.With(err, "reading comments").Set("id", iss.ID).Err()
 		}
 		parsed[i] = cs
-		for _, c := range cs {
-			id, ok := beadsfile.CommentID(c)
+		for j, key := range commentKeys(iss.ID, cs) {
+			id, ok := beadsfile.CommentID(cs[j])
 			if !ok {
 				continue
 			}
-			key := commentKey{issue: iss.ID, identity: commentIdentity(c)}
-			s := commentSlot{issue: i, obj: c, key: key, want: id, rank: rankAdded}
-			if oid, ok := oursIDs[key]; ok {
-				s.want, s.rank = oid, rankOurs
+			bid, inBase := baseIDs[key]
+			oid, inOurs := oursIDs[key]
+			tid, inTheirs := theirsIDs[key]
+			want := id
+			switch {
+			case inBase && inOurs && inTheirs && oid == bid:
+				want = tid
+			case inOurs:
+				want = oid
+			case inTheirs:
+				want = tid
 			}
-			if bid, ok := baseIDs[key]; ok && bid == s.want {
-				s.rank = rankBase
+			rank := rankAdded
+			switch {
+			case inBase && want == bid:
+				rank = rankBase
+			case inBase || inOurs:
+				rank = rankKept
 			}
-			slots = append(slots, s)
+			var alts []int64
+			for _, alt := range []struct {
+				id int64
+				ok bool
+			}{{oid, inOurs}, {bid, inBase}, {tid, inTheirs}} {
+				if alt.ok && alt.id != want && !slices.Contains(alts, alt.id) {
+					alts = append(alts, alt.id)
+				}
+			}
+			slots = append(slots, commentSlot{issue: i, obj: cs[j], want: want, alts: alts, rank: rank})
 		}
 	}
 	sort.SliceStable(slots, func(a, b int) bool { return slots[a].rank < slots[b].rank })
@@ -592,6 +631,12 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 	touched := map[int]bool{}
 	for _, s := range slots {
 		id := s.want
+		for _, alt := range s.alts {
+			if !claimed[id] {
+				break
+			}
+			id = alt
+		}
 		if claimed[id] {
 			maxID++
 			id = maxID
@@ -632,12 +677,12 @@ func commentIDs(f *beadsfile.File) (map[commentKey]int64, int64, error) {
 		if err != nil {
 			return nil, 0, errors.With(err, "reading comments").Set("id", iss.ID).Err()
 		}
-		for _, c := range cs {
-			id, ok := beadsfile.CommentID(c)
+		for j, key := range commentKeys(iss.ID, cs) {
+			id, ok := beadsfile.CommentID(cs[j])
 			if !ok {
 				continue
 			}
-			ids[commentKey{issue: iss.ID, identity: commentIdentity(c)}] = id
+			ids[key] = id
 			maxID = max(maxID, id)
 		}
 	}
