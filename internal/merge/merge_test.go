@@ -415,3 +415,19 @@ func TestMerge_RenumberingClearsTheirsMaxID(t *testing.T) {
 	require.Equal(t, []merge.Renumber{{IssueID: "t-y", Old: 3, New: 61}}, rep.Renumbers)
 	requireUniqueCommentIDs(t, out)
 }
+
+// A renumbering only theirs made is kept even when ours' id is free, so the
+// line comes through as theirs wrote it.
+func TestMerge_OneSidedCommentIDChangeWinsWithoutACollision(t *testing.T) {
+	b := `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":5,"issue_id":"t-b","author":"x","text":"two","created_at":"2026-01-01T00:00:00Z"}]}`
+	bRenumbered := `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":9,"issue_id":"t-b","author":"x","text":"two","created_at":"2026-01-01T00:00:00Z"}]}`
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, b, x)
+	ours := file(t, b, `{"id":"t-x","title":"x","priority":1,"updated_at":"2026-01-02T00:00:00Z"}`)
+	theirs := file(t, bRenumbered, `{"id":"t-x","title":"x","assignee":"z","updated_at":"2026-01-03T00:00:00Z"}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Contains(t, out, bRenumbered+"\n")
+	require.Empty(t, rep.Renumbers)
+}
