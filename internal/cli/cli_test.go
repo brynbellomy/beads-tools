@@ -139,6 +139,46 @@ func TestDriver_BranchesThatBothAddChildrenKeepBoth(t *testing.T) {
 	require.True(t, titles["A child"] && titles["B child"], "neither child is lost")
 }
 
+// Minimized from sirene's merges 46199db11 and 63300e134: a note posted on
+// two issues in the same second, then one comment added on each branch with the
+// same id. git runs the driver; the untouched lines keep their bytes and every
+// comment id stays unique.
+func TestDriver_SameNoteOnSeveralIssuesSurvivesAMerge(t *testing.T) {
+	const (
+		a = `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":819,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
+		b = `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":162,"issue_id":"t-b","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
+		x = `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+		y = `{"id":"t-y","title":"y","updated_at":"2026-01-01T00:00:00Z"}`
+	)
+	main := testrepo.New(t, "")
+	install(t, main)
+	main.Write(".beads/issues.jsonl", strings.Join([]string{a, b, x, y}, "\n")+"\n")
+	main.Commit("issues")
+	main.G("branch", "side")
+
+	main.Write(".beads/issues.jsonl", strings.Join([]string{a, b,
+		`{"id":"t-x","title":"x","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":820,"issue_id":"t-x","author":"o","text":"ours","created_at":"2026-01-02T00:00:00Z"}]}`,
+		y}, "\n")+"\n")
+	main.Commit("comment on x")
+
+	side := &testrepo.Repo{T: t, Dir: filepath.Join(t.TempDir(), "side")}
+	main.G("worktree", "add", "-q", side.Dir, "side")
+	side.Write(".beads/issues.jsonl", strings.Join([]string{a, b, x,
+		`{"id":"t-y","title":"y","updated_at":"2026-01-03T00:00:00Z","comments":[{"id":820,"issue_id":"t-y","author":"t","text":"theirs","created_at":"2026-01-03T00:00:00Z"}]}`,
+	}, "\n")+"\n")
+	side.Commit("comment on y")
+
+	main.G("merge", "-q", "--no-edit", "side")
+
+	data, err := os.ReadFile(filepath.Join(main.Dir, ".beads", "issues.jsonl"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), a+"\n")
+	require.Contains(t, string(data), b+"\n")
+	got := rows(t, main.Dir)
+	require.Equal(t, int64(820), got["t-x"].Comments[0].ID)
+	require.Equal(t, int64(821), got["t-y"].Comments[0].ID)
+}
+
 func TestMerge_BadInputExitsWithoutTouchingOurs(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) string {

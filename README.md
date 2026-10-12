@@ -60,8 +60,18 @@ issue by issue, field by field:
 - When both sides create a different child under the same `<parent>.N`, the
   incoming one is renumbered to the next free `N` and every reference to it is
   rewritten.
-- A comment whose ID is already used by a different comment gets a fresh ID.
-  Comments both sides have keep ours' ID.
+- Comment IDs stay unique across the whole file, as br requires. A comment
+  is matched across sides within its own issue, since one note posted on
+  several issues in the same second has the same author, time and text on
+  each; identical comments within one issue are matched in file order. Each
+  comment's ID merges three-way: the side that changed it from base wins,
+  and ours wins when both did. IDs are then claimed in order: comments that
+  carry base's ID for them first, then comments base or ours already had,
+  then comments only theirs added. A comment whose ID a different comment
+  already holds takes another ID one of the sides holds for it, if that one
+  is free, and otherwise the next ID above every ID in base, ours and
+  theirs; that renumbering is printed. The same rule repairs duplicate IDs
+  an input already carries.
 - Lines the merge did not change keep their exact bytes. Output is sorted by
   ID, as br exports it.
 

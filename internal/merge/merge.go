@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -108,12 +109,19 @@ func Merge(base, ours, theirs *beadsfile.File) (*beadsfile.File, *Report, error)
 			out = append(out, iss)
 		}
 	}
-	if err := renumberComments(ours, out, rep); err != nil {
+	if err := assignCommentIDs(base, ours, theirs, out, rep); err != nil {
 		return nil, nil, err
 	}
 	f, err := beadsfile.New(out)
 	if err != nil {
 		return nil, nil, err
+	}
+	dups, err := f.DuplicateCommentIDs()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(dups) > 0 {
+		return nil, nil, errors.WithNew("merge produced a duplicate comment id").Set("duplicate", dups[0].String()).Err()
 	}
 	return f, rep, nil
 }
@@ -509,78 +517,147 @@ func renameCollisions(base, ours, theirs *beadsfile.File, rep *Report) (*beadsfi
 	return beadsfile.New(issues)
 }
 
-// renumberComments makes comment IDs agree with ours: a comment ours has keeps
-// ours' ID, and a comment ours lacks gets a fresh ID when its own is used by a
-// different comment. br keeps comment IDs unique across the whole database and
-// silently renumbers duplicates on import.
-func renumberComments(ours *beadsfile.File, out []*beadsfile.Issue, rep *Report) error {
-	owner := map[int64]string{}
-	oursID := map[string]int64{}
-	var maxID int64
-	note := func(c *beadsfile.Object) {
-		if id, ok := commentID(c); ok && id > maxID {
-			maxID = id
-		}
+// commentKey names one comment within one issue. Identity alone is not enough:
+// br users post the same text on several issues in the same second, and nth
+// tells apart identical comments within one issue, in file order.
+type commentKey struct {
+	issue, identity string
+	nth             int
+}
+
+// commentKeys names each comment of one issue.
+func commentKeys(issue string, cs []*beadsfile.Object) []commentKey {
+	seen := map[string]int{}
+	keys := make([]commentKey, len(cs))
+	for i, c := range cs {
+		ident := commentIdentity(c)
+		keys[i] = commentKey{issue: issue, identity: ident, nth: seen[ident]}
+		seen[ident]++
 	}
-	for _, iss := range ours.Issues {
-		cs, err := beadsfile.ParseObjectArray(iss.Obj.Raw("comments"))
-		if err != nil {
-			return err
-		}
-		for _, c := range cs {
-			if id, ok := commentID(c); ok {
-				owner[id] = commentIdentity(c)
-				oursID[commentIdentity(c)] = id
-			}
-			note(c)
-		}
+	return keys
+}
+
+// commentRank orders claims on a comment id; a lower rank claims first.
+type commentRank int
+
+const (
+	// rankBase: the comment carries the id base gave it, so an issue line
+	// neither side changed never loses an id.
+	rankBase commentRank = iota
+	// rankKept: a comment base or ours has, carrying the id a side gave it.
+	rankKept
+	// rankAdded: the comment came from theirs alone.
+	rankAdded
+)
+
+type commentSlot struct {
+	issue int
+	obj   *beadsfile.Object
+	want  int64
+	// alts are the other ids the sides hold for this comment (ours, base,
+	// theirs order), taken before a fresh id when want is already claimed.
+	alts []int64
+	rank commentRank
+}
+
+// assignCommentIDs makes comment ids in out unique across the file, as br
+// requires. Each comment's id merges three-way: a side that changed it from
+// base wins, and ours wins when both did. Claims then go in rank order. A
+// comment whose id is already claimed by a different comment takes another id
+// a side holds for it, else the next id above every id in base, ours and
+// theirs.
+func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue, rep *Report) error {
+	baseIDs, maxBase, err := commentIDs(base)
+	if err != nil {
+		return err
 	}
-	for _, iss := range out {
-		cs, err := beadsfile.ParseObjectArray(iss.Obj.Raw("comments"))
-		if err != nil {
-			return err
-		}
-		for _, c := range cs {
-			note(c)
-		}
+	oursIDs, maxOurs, err := commentIDs(ours)
+	if err != nil {
+		return err
 	}
+	theirsIDs, maxTheirs, err := commentIDs(theirs)
+	if err != nil {
+		return err
+	}
+	maxID := max(maxBase, maxOurs, maxTheirs)
+
+	parsed := make([][]*beadsfile.Object, len(out))
+	var slots []commentSlot
 	for i, iss := range out {
 		cs, err := beadsfile.ParseObjectArray(iss.Obj.Raw("comments"))
 		if err != nil {
-			return err
+			return errors.With(err, "reading comments").Set("id", iss.ID).Err()
 		}
-		touched := false
-		for _, c := range cs {
-			ident := commentIdentity(c)
-			id, ok := commentID(c)
+		parsed[i] = cs
+		for j, key := range commentKeys(iss.ID, cs) {
+			id, ok := beadsfile.CommentID(cs[j])
 			if !ok {
 				continue
 			}
-			if oid, ok := oursID[ident]; ok {
-				if oid != id {
-					c.SetRaw("id", json.RawMessage(strconv.FormatInt(oid, 10)))
-					touched = true
+			bid, inBase := baseIDs[key]
+			oid, inOurs := oursIDs[key]
+			tid, inTheirs := theirsIDs[key]
+			want := id
+			switch {
+			case inBase && inOurs && inTheirs && oid == bid:
+				want = tid
+			case inOurs:
+				want = oid
+			case inTheirs:
+				want = tid
+			}
+			rank := rankAdded
+			switch {
+			case inBase && want == bid:
+				rank = rankBase
+			case inBase || inOurs:
+				rank = rankKept
+			}
+			var alts []int64
+			for _, alt := range []struct {
+				id int64
+				ok bool
+			}{{oid, inOurs}, {bid, inBase}, {tid, inTheirs}} {
+				if alt.ok && alt.id != want && !slices.Contains(alts, alt.id) {
+					alts = append(alts, alt.id)
 				}
-				continue
 			}
-			if prev, used := owner[id]; !used || prev == ident {
-				owner[id] = ident
-				continue
-			}
-			maxID++
-			c.SetRaw("id", json.RawMessage(strconv.FormatInt(maxID, 10)))
-			owner[maxID] = ident
-			rep.Renumbers = append(rep.Renumbers, Renumber{IssueID: iss.ID, Old: id, New: maxID})
-			touched = true
+			slots = append(slots, commentSlot{issue: i, obj: cs[j], want: want, alts: alts, rank: rank})
 		}
-		if !touched {
+	}
+	sort.SliceStable(slots, func(a, b int) bool { return slots[a].rank < slots[b].rank })
+
+	claimed := map[int64]bool{}
+	touched := map[int]bool{}
+	for _, s := range slots {
+		id := s.want
+		for _, alt := range s.alts {
+			if !claimed[id] {
+				break
+			}
+			id = alt
+		}
+		if claimed[id] {
+			maxID++
+			id = maxID
+			rep.Renumbers = append(rep.Renumbers, Renumber{IssueID: out[s.issue].ID, Old: s.want, New: id})
+		}
+		claimed[id] = true
+		if cur, _ := beadsfile.CommentID(s.obj); cur != id {
+			s.obj.SetRaw("id", json.RawMessage(strconv.FormatInt(id, 10)))
+			touched[s.issue] = true
+		}
+	}
+
+	for i := range out {
+		if !touched[i] {
 			continue
 		}
-		raw, err := beadsfile.MarshalObjectArray(cs)
+		raw, err := beadsfile.MarshalObjectArray(parsed[i])
 		if err != nil {
 			return err
 		}
-		obj := iss.Obj.Clone()
+		obj := out[i].Obj.Clone()
 		obj.SetRaw("comments", raw)
 		ni, err := beadsfile.NewIssue(obj)
 		if err != nil {
@@ -591,11 +668,23 @@ func renumberComments(ours *beadsfile.File, out []*beadsfile.Issue, rep *Report)
 	return nil
 }
 
-func commentID(c *beadsfile.Object) (int64, bool) {
-	raw := c.Raw("id")
-	if raw == nil {
-		return 0, false
+// commentIDs maps each comment in f to its id, and returns the largest id.
+func commentIDs(f *beadsfile.File) (map[commentKey]int64, int64, error) {
+	ids := map[commentKey]int64{}
+	var maxID int64
+	for _, iss := range f.Issues {
+		cs, err := beadsfile.ParseObjectArray(iss.Obj.Raw("comments"))
+		if err != nil {
+			return nil, 0, errors.With(err, "reading comments").Set("id", iss.ID).Err()
+		}
+		for j, key := range commentKeys(iss.ID, cs) {
+			id, ok := beadsfile.CommentID(cs[j])
+			if !ok {
+				continue
+			}
+			ids[key] = id
+			maxID = max(maxID, id)
+		}
 	}
-	n, err := strconv.ParseInt(string(raw), 10, 64)
-	return n, err == nil
+	return ids, maxID, nil
 }
