@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -207,4 +208,47 @@ func TestPR_OtherMergeRefusalsAreNotRetried(t *testing.T) {
 func TestDriverCommand_QuotesThePath(t *testing.T) {
 	require.Equal(t, `'/opt/my tools/beads-tools' merge`, land.DriverCommand("/opt/my tools/beads-tools"))
 	require.Equal(t, `'/it'\''s/beads-tools' merge`, land.DriverCommand("/it's/beads-tools"))
+}
+
+// The base moves after land pushed the head and before it merges: the remote
+// publishes a commit on main the moment the PR branch arrives. land reads the
+// base's tip right before merging and brings the head up to date again.
+func TestPR_BaseMovingAfterThePushIsCaughtUpBeforeMerging(t *testing.T) {
+	r, _, head := closingPR(t)
+	other := &testrepo.Repo{T: t, Dir: t.TempDir()}
+	other.G("clone", "-q", "--branch", "main", r.G("remote", "get-url", "origin"), ".")
+	other.G("config", "user.email", "other@example.com")
+	other.G("config", "user.name", "other")
+	other.Write("other.go", "package other\n")
+	moved := other.Commit("other work on main")
+	marker := filepath.Join(t.TempDir(), "fired")
+	hook := "#!/bin/sh\nwhile read old new ref; do\n" +
+		"  if [ \"$ref\" = refs/heads/feat/g ] && [ ! -e '" + marker + "' ]; then\n" +
+		"    touch '" + marker + "'\n" +
+		"    env -u GIT_DIR git -C '" + other.Dir + "' push -q origin HEAD:main\n" +
+		"  fi\ndone\n"
+	require.NoError(t, os.WriteFile(filepath.Join(r.G("remote", "get-url", "origin"), "hooks", "post-receive"), []byte(hook), 0o755))
+
+	gh := viewOnly(t, head)
+	var merged string
+	gh.EXPECT().Merge(mock.Anything, "3", mock.Anything, "merge").
+		Run(func(_ context.Context, _, sha, _ string) { merged = sha }).Return(nil).Once()
+
+	var out bytes.Buffer
+	require.NoError(t, lander(r, gh, &out).PR(context.Background(), 3, land.Options{}), out.String())
+
+	require.FileExists(t, marker, "main moved after the push")
+	require.True(t, isAncestor(r, moved, merged), "the merged head contains the base's new tip")
+	require.Contains(t, out.String(), "main moved since the head was built")
+}
+
+func TestLand_RefusesTheRebaseMergeMethod(t *testing.T) {
+	r, _, _ := closingPR(t)
+	r.G("config", "beadstools.mergeMethod", "rebase")
+	gh := mocks.NewMockGitHub(t)
+
+	err := lander(r, gh, &bytes.Buffer{}).PR(context.Background(), 3, land.Options{})
+	require.ErrorContains(t, err, "mergeMethod=rebase is not supported")
+	err = lander(r, gh, &bytes.Buffer{}).Sweep(context.Background(), land.Options{})
+	require.ErrorContains(t, err, "mergeMethod=rebase is not supported")
 }

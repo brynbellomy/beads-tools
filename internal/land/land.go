@@ -150,13 +150,29 @@ func short(sha string) string {
 	return sha
 }
 
-func (l *Lander) mergeMethod(ctx context.Context) string {
-	return l.Repo.Config(ctx, "beadstools.mergeMethod", "merge")
+// mergeMethod reads beadstools.mergeMethod. Rebase is refused: GitHub replays
+// each commit onto the base as a text merge, which reintroduces the text merge
+// of the issues file that bringing the head up to date avoids. A squash takes
+// the head's tree when the head contains the base, so it is allowed.
+func (l *Lander) mergeMethod(ctx context.Context) (string, error) {
+	switch m := l.Repo.Config(ctx, "beadstools.mergeMethod", "merge"); m {
+	case "merge", "squash":
+		return m, nil
+	case "rebase":
+		return "", errors.WithNew("beadstools.mergeMethod=rebase is not supported: GitHub's rebase replays each commit " +
+			"onto the base as a text merge, which can leave duplicate comment ids in .beads/issues.jsonl; use merge").Err()
+	default:
+		return "", errors.WithNew("unknown beadstools.mergeMethod").Set("method", m).Err()
+	}
 }
 
 // Sweep closes every issue a commit on the main branch closes but that is still
 // open there, through a pull request it merges itself.
 func (l *Lander) Sweep(ctx context.Context, opts Options) error {
+	method, err := l.mergeMethod(ctx)
+	if err != nil {
+		return err
+	}
 	remote, main := l.Repo.Remote(ctx), l.Repo.MainBranch(ctx)
 	if _, err := l.Repo.Run(ctx, "fetch", remote, main); err != nil {
 		return err
@@ -242,7 +258,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 		}
 		return sha, l.push(ctx, remote, sha, branch)
 	}
-	if err := l.mergePushedHead(ctx, url, sha, refresh); err != nil {
+	if err := l.mergePushedHead(ctx, url, sha, method, remote, main, refresh); err != nil {
 		return err
 	}
 	l.printf("merged %s\n", url)
@@ -255,10 +271,17 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 // PR lands pull request number. In a throwaway worktree it brings the PR's
 // head up to date with the base branch through the merge driver, closes the
 // issues the PR's commits close in one commit, pushes that head and merges the
-// PR only if it is still the head. GitHub's merge then yields the head's issues
-// file, so the work and its closes reach the main branch together and no text
-// merge of the issues file happens on GitHub's side.
+// PR only if it is still the head. While the head contains the base, GitHub's
+// merge takes the head's issues file as it is. The base can still move in the
+// moment between the last check of its tip and GitHub's merge, and GitHub then
+// merges the issues file as text; branch protection's "Require branches to be
+// up to date before merging" makes GitHub refuse instead, and land catches up
+// and retries.
 func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
+	method, err := l.mergeMethod(ctx)
+	if err != nil {
+		return err
+	}
 	ref := strconv.Itoa(number)
 	pr, err := l.GitHub.View(ctx, ref)
 	if err != nil {
@@ -351,7 +374,7 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 		}
 		return sha, l.push(ctx, remote, sha, pr.HeadRefName)
 	}
-	if err := l.mergePushedHead(ctx, ref, sha, refresh); err != nil {
+	if err := l.mergePushedHead(ctx, ref, sha, method, remote, pr.BaseRefName, refresh); err != nil {
 		return err
 	}
 	l.printf("merged #%d\n", number)
@@ -407,13 +430,23 @@ func (l *Lander) push(ctx context.Context, remote, sha, branch string) error {
 }
 
 // mergePushedHead merges pull request ref (a number or URL) pinned to sha.
+// Right before each merge it reads the base branch's tip on remote, and when
+// sha does not contain it, refresh brings the head up to date and pushes it.
 // GitHub refuses a merge while the base branch moves under it; then, a bounded
-// number of times and only while sha is still the head, refresh brings the
-// head up to date with the new base and pushes it, and the merge is retried
-// on the head it returns. Any other refusal is final.
-func (l *Lander) mergePushedHead(ctx context.Context, ref, sha string, refresh func(context.Context) (string, error)) error {
-	method := l.mergeMethod(ctx)
+// number of times and only while sha is still the head, the same refresh runs
+// and the merge is retried on the head it returns. Any other refusal is final.
+func (l *Lander) mergePushedHead(ctx context.Context, ref, sha, method, remote, base string, refresh func(context.Context) (string, error)) error {
 	for attempt := 1; ; attempt++ {
+		current, err := l.containsRemoteTip(ctx, remote, base, sha)
+		if err != nil {
+			return err
+		}
+		if !current {
+			l.printf("%s moved since the head was built; bringing the head up to date\n", base)
+			if sha, err = refresh(ctx); err != nil {
+				return err
+			}
+		}
 		mergeErr := l.GitHub.Merge(ctx, ref, sha, method)
 		if mergeErr == nil {
 			return nil
@@ -445,6 +478,24 @@ func (l *Lander) mergePushedHead(ctx context.Context, ref, sha string, refresh f
 	}
 }
 
+// containsRemoteTip reports whether sha contains the tip branch has on remote
+// right now. A tip not yet fetched is not contained.
+func (l *Lander) containsRemoteTip(ctx context.Context, remote, branch, sha string) (bool, error) {
+	out, err := l.Repo.Run(ctx, "ls-remote", remote, "refs/heads/"+branch)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return false, errors.WithNew("base branch not found on the remote").Set("remote", remote, "branch", branch).Err()
+	}
+	if _, err := l.Repo.Run(ctx, "cat-file", "-e", fields[0]+"^{commit}"); err != nil {
+		return false, nil
+	}
+	_, err = l.Repo.Run(ctx, "merge-base", "--is-ancestor", fields[0], sha)
+	return err == nil, nil
+}
+
 func pause(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()
@@ -473,7 +524,9 @@ func (l *Lander) refuseDuplicateCommentIDs(issues *beadsfile.File, where string)
 		l.printf("refuse %s: %s\n", where, d)
 	}
 	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s); br refuses to import it. "+
-		"Renumber all but one comment for each id (the merge driver does this when it merges the branch again) and push", where, len(dups))).Err()
+		"If this branch never changed .beads/issues.jsonl it inherited them from the base branch unchanged (git runs the "+
+		"merge driver only when both sides changed the file): repair the base first with a .beads/-only pull request "+
+		"that renumbers all but one comment for each id, then land again", where, len(dups))).Err()
 }
 
 // issuesAt parses the issues file as of rev.

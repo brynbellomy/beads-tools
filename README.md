@@ -124,12 +124,26 @@ tool's merge driver handling the issues file whatever the repository's own
 git config says. It then applies the landing rules to that head, adds one
 commit that closes the issues the PR's `Closes:` trailers name, pushes the
 result to the PR's branch (a plain push, which fails if anyone pushed
-meanwhile) and merges the PR with `gh pr merge --match-head-commit`. GitHub
-merges server-side without custom merge drivers, but because the head
-already contains the base, its merge takes the head's issues file as it is.
+meanwhile) and merges the PR with `gh pr merge --match-head-commit`. Right
+before each merge call it reads the base branch's tip on the remote again,
+and if the pushed head does not contain it, brings the head up to date once
+more. GitHub merges server-side without custom merge drivers, but while the
+head contains the base, its merge takes the head's issues file as it is.
 The work and its closes reach the main branch in the same merge. A merge
 conflict outside `.beads/` while bringing the head up to date stops the
 landing; merge the base by hand, push, and land again.
+
+One window remains: if the base moves in the moment between that last read
+of its tip and GitHub's merge, and GitHub does not refuse, GitHub merges the
+issues file as text, and a duplicate comment ID can reach the base. Turn on
+the branch protection setting "Require branches to be up to date before
+merging" for the base branch to close it: GitHub then refuses the merge, and
+`land pr` brings the head up to date and retries.
+
+The merge driver is forced through git config and an attributes file, but a
+checked-in `.gitattributes` or `.git/info/attributes` that gives the issues
+file a different `merge` attribute takes precedence. The duplicate comment
+ID check on the merged head still refuses the landing in that case.
 
 GitHub refuses a merge while the base branch moves under it ("Base branch was
 modified"). On that refusal, while the PR's head is still the commit `land
@@ -215,7 +229,7 @@ All optional, in git config:
 |---|---|---|
 | `beadstools.remote` | `origin` | Remote to publish to. |
 | `beadstools.mainBranch` | the remote's HEAD, else `main` | Branch that counts as merged. |
-| `beadstools.mergeMethod` | `merge` | `merge`, `squash` or `rebase`. `sweep` reads trailers from the main branch's history, and git only parses trailers in a message's last paragraph, so a squash message that concatenates several commits keeps only the last one's. Prefer `merge`. |
+| `beadstools.mergeMethod` | `merge` | `merge` or `squash`. `land` refuses `rebase`: GitHub's rebase replays each commit onto the base as a text merge, which can leave duplicate comment IDs in the issues file. `sweep` reads trailers from the main branch's history, and git only parses trailers in a message's last paragraph, so a squash message that concatenates several commits keeps only the last one's. Prefer `merge`. |
 | `beadstools.requireTrailers` | `true` | Require a trailer on commits off the main branch, in the hook, `land pr` and `check`. `land pr` and `check` take `--require-trailers=BOOL` to override it for one run; `git -c` does not reach beads-tools, which is not a git subcommand. |
 
 ## Working with br
