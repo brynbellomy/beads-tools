@@ -249,3 +249,99 @@ func TestParse_RejectsConflictMarkers(t *testing.T) {
 	_, err := beadsfile.Parse(strings.NewReader(epicBase + "\n<<<<<<< HEAD\n"))
 	require.Error(t, err)
 }
+
+// Minimized from sirene's merge 46199db11: one note posted on several issues
+// in the same second gives comments with equal author, time and text but
+// distinct ids. Neither side touched those issues, and their lines must come
+// through byte for byte.
+const (
+	bulkA = `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":819,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
+	bulkB = `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":162,"issue_id":"t-b","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
+)
+
+func commentIDs(t *testing.T, m map[string]any) []int64 {
+	t.Helper()
+	raw, _ := m["comments"].([]any)
+	out := make([]int64, len(raw))
+	for i, c := range raw {
+		out[i] = int64(c.(map[string]any)["id"].(float64))
+	}
+	return out
+}
+
+func requireUniqueCommentIDs(t *testing.T, out string) {
+	t.Helper()
+	f := file(t, strings.TrimSpace(out))
+	dups, err := f.DuplicateCommentIDs()
+	require.NoError(t, err)
+	require.Empty(t, dups)
+}
+
+func TestMerge_IssuesNeitherSideTouchedKeepTheirBytes(t *testing.T) {
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, bulkA, bulkB, x)
+	ours := file(t, bulkA, bulkB, `{"id":"t-x","title":"x","priority":1,"updated_at":"2026-01-02T00:00:00Z"}`)
+	theirs := file(t, bulkA, bulkB, `{"id":"t-x","title":"x","assignee":"z","updated_at":"2026-01-03T00:00:00Z"}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Contains(t, out, bulkA+"\n")
+	require.Contains(t, out, bulkB+"\n")
+	require.Empty(t, rep.Renumbers)
+	requireUniqueCommentIDs(t, out)
+}
+
+func TestMerge_SharedCommentKeepsItsOwnIssuesID(t *testing.T) {
+	base := file(t, bulkA, bulkB)
+	ours := file(t,
+		`{"id":"t-a","title":"a","priority":1,"updated_at":"2026-01-02T00:00:00Z","comments":[{"id":819,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`,
+		bulkB)
+	theirs := file(t,
+		`{"id":"t-a","title":"a2","updated_at":"2026-01-03T00:00:00Z","comments":[{"id":819,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`,
+		bulkB)
+
+	out, rep := run(t, base, ours, theirs)
+
+	a := issue(t, out, "t-a")
+	require.Equal(t, "a2", a["title"])
+	require.EqualValues(t, 1, a["priority"])
+	require.Equal(t, []int64{819}, commentIDs(t, a), "the comment both sides hold keeps its id, not t-b's")
+	require.Contains(t, out, bulkB+"\n")
+	require.Empty(t, rep.Renumbers)
+}
+
+func TestMerge_AddedCommentThatCollidesIsRenumberedAboveEveryInput(t *testing.T) {
+	gone := `{"id":"t-gone","title":"gone","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":900,"issue_id":"t-gone","author":"x","text":"old","created_at":"2026-01-01T00:00:00Z"}]}`
+	x := `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	y := `{"id":"t-y","title":"y","updated_at":"2026-01-01T00:00:00Z"}`
+	base := file(t, bulkA, bulkB, gone, x, y)
+	ours := file(t, bulkA, bulkB,
+		`{"id":"t-x","title":"x","updated_at":"2026-01-02T00:00:00Z","comments":[{"id":848,"issue_id":"t-x","author":"o","text":"ours","created_at":"2026-01-02T00:00:00Z"}]}`,
+		y)
+	theirs := file(t, bulkA, bulkB, x,
+		`{"id":"t-y","title":"y","updated_at":"2026-01-03T00:00:00Z","comments":[{"id":848,"issue_id":"t-y","author":"t","text":"theirs","created_at":"2026-01-03T00:00:00Z"}]}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	require.Equal(t, []int64{848}, commentIDs(t, issue(t, out, "t-x")), "ours' comment keeps its id")
+	require.Equal(t, []int64{901}, commentIDs(t, issue(t, out, "t-y")), "theirs' colliding comment moves above base's 900")
+	require.Equal(t, []merge.Renumber{{IssueID: "t-y", Old: 848, New: 901}}, rep.Renumbers)
+	require.Contains(t, out, bulkA+"\n")
+	require.Contains(t, out, bulkB+"\n")
+	requireUniqueCommentIDs(t, out)
+}
+
+// Minimized from sirene's merge e813e2978: ours carried the duplicates an
+// earlier merge introduced. The comment that held the id in base keeps it.
+func TestMerge_OutputNeverHoldsADuplicateCommentID(t *testing.T) {
+	base := file(t, bulkA, bulkB)
+	corrupt := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":162,"issue_id":"t-a","author":"x","text":"SUBSUMED","created_at":"2026-07-17T19:14:12Z"}]}`
+	ours := file(t, corrupt, bulkB)
+	theirs := file(t, bulkA, bulkB)
+
+	out, rep := run(t, base, ours, theirs)
+
+	requireUniqueCommentIDs(t, out)
+	require.Contains(t, out, bulkB+"\n", "t-b held 162 in base and keeps it")
+	require.Equal(t, []merge.Renumber{{IssueID: "t-a", Old: 162, New: 820}}, rep.Renumbers)
+}
