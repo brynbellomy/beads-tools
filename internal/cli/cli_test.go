@@ -179,6 +179,39 @@ func TestDriver_SameNoteOnSeveralIssuesSurvivesAMerge(t *testing.T) {
 	require.Equal(t, int64(821), got["t-y"].Comments[0].ID)
 }
 
+// git runs the commit-msg hook on an ordinary merge commit; a merge of main
+// that only inherits main's duplicate comment id must go through.
+func TestHook_MergeOfMainInheritingADuplicatePasses(t *testing.T) {
+	const (
+		a = `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"one","created_at":"2026-01-01T00:00:00Z"}]}`
+		b = `{"id":"t-b","title":"b","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":7,"issue_id":"t-b","author":"x","text":"two","created_at":"2026-01-01T00:00:00Z"}]}`
+		x = `{"id":"t-x","title":"x","updated_at":"2026-01-01T00:00:00Z"}`
+	)
+	main := testrepo.New(t, "")
+	install(t, main)
+	main.Write(".beads/issues.jsonl", x+"\n")
+	main.Commit("issues")
+	main.G("branch", "feat/m")
+	main.Write(".beads/issues.jsonl", a+"\n"+b+"\n"+x+"\n")
+	main.Commit("beads: import with a duplicate")
+
+	feat := &testrepo.Repo{T: t, Dir: filepath.Join(t.TempDir(), "feat")}
+	main.G("worktree", "add", "-q", feat.Dir, "feat/m")
+	feat.Write("m.go", "package m\n")
+	feat.Commit("feat: m\n\nRefs: t-x")
+
+	feat.G("merge", "-q", "--no-edit", "main")
+	require.Contains(t, feat.G("log", "-1", "--format=%P"), " ", "the merge commit was made, through the hook")
+
+	feat.Write(".beads/issues.jsonl", a+"\n"+b+"\n"+strings.Replace(a, `"t-a"`, `"t-c"`, 2)+"\n"+x+"\n")
+	feat.G("add", ".beads/issues.jsonl")
+	commit := exec.Command("git", "commit", "-q", "-m", "beads: add t-c\n\nRefs: t-x")
+	commit.Dir = feat.Dir
+	out, err := commit.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(out), "comment id 7 is used 3 times", "a third copy is a new duplicate")
+}
+
 func TestMerge_BadInputExitsWithoutTouchingOurs(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) string {

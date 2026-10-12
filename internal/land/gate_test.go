@@ -30,7 +30,7 @@ func prRepo(t *testing.T, build func(r *testrepo.Repo, id string)) (*testrepo.Re
 
 func viewOnly(t *testing.T, head string) *mocks.MockGitHub {
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 3).Return(land.PR{Number: 3, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: head}, nil)
+	gh.EXPECT().View(mock.Anything, "3").Return(land.PR{Number: 3, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/g", HeadRefOid: head}, nil)
 	return gh
 }
 
@@ -63,14 +63,13 @@ func TestPR_DryRunAlsoRefuses(t *testing.T) {
 
 func TestPR_RefusesUnknownIssuesEvenWhenTrailersAreOptional(t *testing.T) {
 	r, _, head := prRepo(t, func(r *testrepo.Repo, _ string) {
-		r.G("config", "beadstools.requireTrailers", "false")
 		r.Write("b.go", "package b\n")
 		r.Commit("feat: b\n\nCloses: t-nope")
 		r.Write("c.go", "package c\n")
 		r.Commit("feat: c, no trailer, allowed when optional")
 	})
 	var out bytes.Buffer
-	err := lander(r, viewOnly(t, head), &out).PR(context.Background(), 3, land.Options{})
+	err := lander(r, viewOnly(t, head), &out).PR(context.Background(), 3, land.Options{TrailersOptional: true})
 	require.ErrorContains(t, err, "1 commit(s)")
 	require.Contains(t, out.String(), "names issues that do not exist: t-nope")
 }

@@ -50,9 +50,10 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 }
 
 // Check applies the landing rules to the commits in base..head against the
-// issues file at head, printing each offender to out. It reports whether every
-// commit may land. It needs only git, so CI can run it.
-func Check(ctx context.Context, repo gitx.Repo, base, head string, out io.Writer) (bool, error) {
+// issues file at head, printing each offender to out, and fails on a comment
+// id the file at head holds more than once. It reports whether the range may
+// land. It needs only git, so CI can run it.
+func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTrailers bool, out io.Writer) (bool, error) {
 	commits, err := trailers.Log(ctx, repo, base+".."+head)
 	if err != nil {
 		return false, err
@@ -61,9 +62,16 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, out io.Writer
 	if err != nil {
 		return false, err
 	}
-	unlinked, err := FindUnlinked(ctx, repo, commits, issues, repo.ConfigBool(ctx, "beadstools.requireTrailers", true))
+	unlinked, err := FindUnlinked(ctx, repo, commits, issues, requireTrailers)
 	if err != nil {
 		return false, err
+	}
+	dups, err := issues.DuplicateCommentIDs()
+	if err != nil {
+		return false, err
+	}
+	for _, d := range dups {
+		fmt.Fprintf(out, "%s at %s: %s\n", beadsfile.Path, head, d)
 	}
 	for _, u := range unlinked {
 		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
@@ -71,12 +79,17 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, out io.Writer
 	for _, r := range ReferencedOpen(commits, issues, nil) {
 		fmt.Fprintf(out, "note: %s is referenced by %s %s but nothing closes it; end the finishing commit with Closes: %s\n", r.ID, short(r.Commit.SHA), r.Commit.Subject, r.ID)
 	}
-	if len(unlinked) == 0 {
-		fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
-		return true, nil
+	if len(dups) > 0 {
+		fmt.Fprintf(out, "%s at %s holds %d duplicate comment id(s), which br refuses to import\n", beadsfile.Path, head, len(dups))
 	}
-	fmt.Fprintf(out, "%d of %d commit(s) do not name a valid issue; reword them to end with a Closes: or Refs: trailer\n", len(unlinked), len(commits))
-	return false, nil
+	if len(unlinked) > 0 {
+		fmt.Fprintf(out, "%d of %d commit(s) do not name a valid issue; reword them to end with a Closes: or Refs: trailer\n", len(unlinked), len(commits))
+	}
+	if len(unlinked) > 0 || len(dups) > 0 {
+		return false, nil
+	}
+	fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
+	return true, nil
 }
 
 func onlyTouchesBeads(ctx context.Context, repo gitx.Repo, sha string) (bool, error) {

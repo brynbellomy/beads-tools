@@ -37,16 +37,21 @@ usage:
   beads-tools hook commit-msg FILE
         check a commit message's Closes:/Refs: trailers
   beads-tools land pr NUMBER [--dry-run] [--no-merge] [--close ID]... [--keep-open]
+                 [--require-trailers=BOOL]
         close the issues a pull request's commits close, on its branch,
         then merge it. issues it only references (Refs:) need a decision:
-        --close each one it finishes, or --keep-open
+        --close each one it finishes, or --keep-open. refuses an issues file
+        with duplicate comment ids
   beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN]
         close issues whose closing commits are already on the main branch,
         through a pull request
-  beads-tools check [--base REV] [--head REV]
+  beads-tools check [--base REV] [--head REV] [--require-trailers=BOOL]
         apply land pr's trailer rules to base..head (default: the main
-        branch on the remote, and HEAD); exits 1 when a commit fails them.
-        Needs only git, for CI.
+        branch on the remote, and HEAD) and its duplicate comment id check to
+        the issues file at head; exits 1 when either fails. Needs only git,
+        for CI.
+
+--require-trailers overrides beadstools.requireTrailers for one run.
 
 git config (all optional):
   beadstools.remote           remote to publish to (origin)
@@ -97,13 +102,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fs.SetOutput(stderr)
 		base := fs.String("base", "", "first excluded revision (default <remote>/<main branch>)")
 		head := fs.String("head", "HEAD", "last revision checked; its issues file is the reference")
+		require := fs.Bool("require-trailers", repo.ConfigBool(ctx, "beadstools.requireTrailers", true), "require a Closes:/Refs: trailer on every commit (overrides beadstools.requireTrailers)")
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
 			return ExitError
 		}
 		if *base == "" {
 			*base = repo.Remote(ctx) + "/" + repo.MainBranch(ctx)
 		}
-		ok, err := land.Check(ctx, repo, *base, *head, stdout)
+		ok, err := land.Check(ctx, repo, *base, *head, *require, stdout)
 		if err != nil {
 			fmt.Fprintf(stderr, "beads-tools: %v\n", err)
 			return ExitError
@@ -173,6 +179,7 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 	fs := flag.NewFlagSet("land "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var opts land.Options
+	var requireTrailers *bool
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&opts.NoMerge, "no-merge", false, "push and open, but leave merging to a person")
 	if args[0] == "pr" {
@@ -181,19 +188,27 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 			return nil
 		})
 		fs.BoolVar(&opts.KeepOpen, "keep-open", false, "confirm the issues the PR references and does not close stay open")
+		requireTrailers = fs.Bool("require-trailers", repo.ConfigBool(ctx, "beadstools.requireTrailers", true), "require a Closes:/Refs: trailer on every commit (overrides beadstools.requireTrailers)")
 	}
 	if args[0] == "sweep" {
 		fs.StringVar(&opts.Since, "since", land.DefaultSince, "how far back to report referenced issues that are still open (git log --since)")
 	}
 
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "beads-tools: locating own binary: %v\n", err)
+		return ExitError
+	}
 	l := &land.Lander{
 		Repo:   repo,
 		GitHub: land.GH{Dir: repo.Dir},
 		Beads:  land.BR{},
 		Out:    stdout,
 		Now:    time.Now,
+
+		MergeRetryDelay: 5 * time.Second,
+		MergeDriver:     land.DriverCommand(self),
 	}
-	var err error
 	switch args[0] {
 	case "pr":
 		if len(args) < 2 {
@@ -208,6 +223,7 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 		if fs.Parse(args[2:]) != nil {
 			return ExitError
 		}
+		opts.TrailersOptional = !*requireTrailers
 		err = l.PR(ctx, n, opts)
 	case "sweep":
 		if fs.Parse(args[1:]) != nil {

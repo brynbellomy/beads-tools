@@ -24,6 +24,8 @@ func lander(r *testrepo.Repo, gh land.GitHub, out *bytes.Buffer) *land.Lander {
 		Beads:  land.BR{},
 		Out:    out,
 		Now:    func() time.Time { return time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC) },
+
+		MergeDriver: driver,
 	}
 }
 
@@ -104,7 +106,7 @@ func TestPR_ClosesOnTheBranchThenMergesThatHead(t *testing.T) {
 	r.G("push", "-q", "origin", "feat/x")
 
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 7).Return(land.PR{
+	gh.EXPECT().View(mock.Anything, "7").Return(land.PR{
 		Number: 7, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/x", HeadRefOid: head,
 	}, nil)
 	var merged string
@@ -136,7 +138,7 @@ func TestPR_KeepOpenMergesTheHeadAsIs(t *testing.T) {
 	r.G("push", "-q", "origin", "feat/y")
 
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 8).Return(land.PR{Number: 8, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/y", HeadRefOid: head}, nil)
+	gh.EXPECT().View(mock.Anything, "8").Return(land.PR{Number: 8, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/y", HeadRefOid: head}, nil)
 	gh.EXPECT().Merge(mock.Anything, "8", head, "merge").Return(nil)
 
 	var out bytes.Buffer
@@ -154,7 +156,7 @@ func TestPR_RefusesWhenTheBranchMoved(t *testing.T) {
 	r.G("push", "-q", "origin", "feat/z")
 
 	gh := mocks.NewMockGitHub(t)
-	gh.EXPECT().View(mock.Anything, 9).Return(land.PR{Number: 9, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/z", HeadRefOid: stale}, nil)
+	gh.EXPECT().View(mock.Anything, "9").Return(land.PR{Number: 9, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/z", HeadRefOid: stale}, nil)
 
 	err := lander(r, gh, &bytes.Buffer{}).PR(context.Background(), 9, land.Options{})
 	require.ErrorContains(t, err, "moved")
