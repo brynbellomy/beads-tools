@@ -81,6 +81,17 @@ func TestCheck_NotesReferencedIssuesWithoutFailing(t *testing.T) {
 	code, out := runCheck(t, r.Dir, "--base", base)
 	require.Equal(t, cli.ExitOK, code, out)
 	require.Contains(t, out, "note: "+id+" is referenced")
+
+	r.Write("b.go", "package b\n")
+	r.Commit("feat: b\n\nCloses: " + id)
+	code, out = runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.NotContains(t, out, "note:", "a Closes: trailer in the range settles the reference")
+
+	r.G("-c", "core.hooksPath=/dev/null", "revert", "--no-edit", "HEAD")
+	code, out = runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "note: "+id+" is referenced", "a reverted Closes: settles nothing")
 }
 
 func TestCheck_BadRevisionIsAnError(t *testing.T) {

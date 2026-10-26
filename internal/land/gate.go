@@ -51,7 +51,8 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 
 // Check applies the landing rules to the commits in base..head against the
 // issues file at head, printing each offender to out, and fails on a comment
-// id the file at head holds more than once. It reports whether the range may
+// id the file at head holds more than once. It notes, without failing, each
+// issue the range references but neither closes nor finds closed. It reports whether the range may
 // land. It needs only git, so CI can run it.
 func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTrailers bool, out io.Writer) (bool, error) {
 	commits, err := trailers.Log(ctx, repo, base+".."+head)
@@ -76,7 +77,12 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	for _, u := range unlinked {
 		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
 	}
-	for _, r := range ReferencedOpen(commits, issues, nil) {
+	planned, _ := Plan(commits, issues, func(trailers.Commit) string { return "" })
+	closing := map[string]bool{}
+	for _, p := range planned {
+		closing[p.ID] = true
+	}
+	for _, r := range ReferencedOpen(commits, issues, closing) {
 		fmt.Fprintf(out, "note: %s is referenced by %s %s but nothing closes it; end the finishing commit with Closes: %s\n", r.ID, short(r.Commit.SHA), r.Commit.Subject, r.ID)
 	}
 	if len(dups) > 0 {
