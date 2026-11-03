@@ -143,6 +143,18 @@ func (l *Lander) report(planned []Planned, skipped []Skipped) {
 	}
 }
 
+// reportBlocked lists the planned closes br refuses; it runs last so the list
+// ends the output.
+func (l *Lander) reportBlocked(blocked []Blocked) {
+	if len(blocked) == 0 {
+		return
+	}
+	l.printf("%d issue(s) not closed: br refuses to close an issue while a blocker is open; close the blockers, then land again\n", len(blocked))
+	for _, b := range blocked {
+		l.printf("not closed: %s\n", b.Why)
+	}
+}
+
 func short(sha string) string {
 	if len(sha) > 9 {
 		return sha[:9]
@@ -189,6 +201,15 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 	planned, skipped := Plan(commits, issues, func(c trailers.Commit) string {
 		return fmt.Sprintf("Closed by %s (%s)", short(c.SHA), c.Subject)
 	})
+	closing := map[string]bool{}
+	for _, p := range planned {
+		closing[p.ID] = true
+	}
+	planned, blocked, err := Order(planned, issues)
+	if err != nil {
+		return err
+	}
+	defer l.reportBlocked(blocked)
 	l.report(planned, skipped)
 	since := opts.Since
 	if since == "" {
@@ -197,10 +218,6 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 	recent, err := trailers.Log(ctx, l.Repo, "--since="+since, ref)
 	if err != nil {
 		return err
-	}
-	closing := map[string]bool{}
-	for _, p := range planned {
-		closing[p.ID] = true
 	}
 	if refs := ReferencedOpen(recent, issues, closing); len(refs) > 0 {
 		l.printf("referenced since %s but still open (close them by hand if their work is done):\n", since)
@@ -337,6 +354,11 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 			Commit: trailers.Commit{Subject: "--close at landing"},
 		})
 	}
+	planned, blocked, err := Order(planned, issues)
+	if err != nil {
+		return err
+	}
+	defer l.reportBlocked(blocked)
 	l.report(planned, skipped)
 	refs := ReferencedOpen(commits, issues, closing)
 	l.reportReferenced(refs)
