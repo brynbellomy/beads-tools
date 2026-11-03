@@ -210,6 +210,15 @@ Both skip issues whose closing commit was reverted (git's standard
 `This reverts commit <sha>.` line), and each issue's close reason cites the
 oldest commit that closes it.
 
+Both close an issue after every issue in the same run that blocks it
+(`blocks`, `waits-for` and `conditional-blocks` dependencies), since br
+refuses to close an issue while a blocker is open. An issue whose blocker is
+open and not closed by the run, that is in a blocking cycle, or whose
+blocker is itself left open, stays open: the run closes the rest and ends
+with a `not closed:` line for each, naming the blocker. They never pass
+`--force`; close the blockers, then land again. `--dry-run` shows the same
+order and the same list.
+
 ### How closes are written
 
 Issues are closed by `br close` itself, so br's validation and your workflow
