@@ -2,10 +2,12 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -178,4 +180,66 @@ func TestLandPR_RequireTrailersFlagOverridesConfig(t *testing.T) {
 	require.Equal(t, cli.ExitOK, code, "the config still applies without the flag: %s", out)
 	code, out = runLand(t, r.Dir, "3", "--dry-run", "--require-trailers=true")
 	require.Equal(t, cli.ExitError, code, out)
+}
+
+func TestCheck_RefusesADependencyCycleTheRangeAdds(t *testing.T) {
+	r := testrepo.New(t, "")
+	epic := r.Create("epic")
+	kid := r.Create("child")
+	other := r.Create("other")
+	r.Run("br", "dep", "add", kid, epic, "--type", "parent-child", "--quiet")
+	r.Run("br", "dep", "add", kid, other, "--type", "related", "--quiet")
+	r.Run("br", "sync", "--flush-only", "--quiet")
+	base := r.Commit("add issues")
+
+	r.Run("br", "dep", "add", other, epic, "--type", "related", "--quiet")
+	r.Run("br", "sync", "--flush-only", "--quiet")
+	cycle := r.Commit("beads: relate")
+	var br struct{ Cycles [][]string }
+	require.NoError(t, json.Unmarshal([]byte(r.Run("br", "dep", "cycles", "--json")), &br))
+	require.Len(t, br.Cycles, 1)
+	walk := strings.Join(br.Cycles[0][:3], " ")
+	require.Contains(t, []string{epic + " " + kid + " " + other, kid + " " + other + " " + epic, other + " " + epic + " " + kid}, walk,
+		"br dep cycles walks the cycle in the same direction")
+
+	code, out := runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitConflict, code, out)
+	require.Contains(t, out, ".beads/issues.jsonl at HEAD adds a dependency cycle: "+
+		other+" related to "+epic+", "+epic+" parent of "+kid+", "+kid+" related to "+other+"\n")
+	require.Contains(t, out, "adds 1 dependency cycle(s); remove one edge of each, usually a related one")
+
+	r.Run("br", "close", epic, kid, other, "--quiet")
+	r.Run("br", "comments", "add", kid, "still a cycle", "--quiet")
+	r.Run("br", "sync", "--flush-only", "--quiet")
+	r.Commit("beads: close")
+	code, out = runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitConflict, code, "a cycle among closed beads counts: %s", out)
+
+	code, out = runCheck(t, r.Dir, "--base", cycle)
+	require.Equal(t, cli.ExitOK, code, "a range that edits the beads of an inherited cycle passes: %s", out)
+}
+
+func TestCheck_PassesACycleTheMergeBaseHolds(t *testing.T) {
+	r := testrepo.New(t, testrepo.NewRemote(t))
+	a := r.Create("a")
+	b := r.Create("b")
+	r.Run("br", "dep", "add", a, b, "--type", "related", "--quiet")
+	r.Run("br", "dep", "add", b, a, "--type", "related", "--quiet")
+	r.Run("br", "sync", "--flush-only", "--quiet")
+	r.Commit("beads: a cycle")
+	r.G("push", "-q", "origin", "main")
+
+	r.G("checkout", "-q", "-b", "feat/c")
+	r.Write("c.go", "package c\n")
+	r.Commit("feat: c\n\nRefs: " + a)
+
+	r.G("checkout", "-q", "main")
+	r.Run("br", "dep", "remove", b, a, "--quiet")
+	r.Run("br", "sync", "--flush-only", "--quiet")
+	r.Commit("beads: break the cycle")
+	r.G("push", "-q", "origin", "main")
+	r.G("checkout", "-q", "feat/c")
+
+	code, out := runCheck(t, r.Dir)
+	require.Equal(t, cli.ExitOK, code, "the branch only inherits the cycle main has since removed: %s", out)
 }
