@@ -25,8 +25,8 @@ const SkipEnv = "BEADS_TOOLS_SKIP"
 var skippedSubjects = []string{"Merge ", "fixup!", "squash!", "amend!", "Revert \""}
 
 // CommitMsg checks the commit message in msgPath. A commit that changes the
-// issues file, merges included, must not add a duplicate comment id that its
-// parents do not already hold. Every
+// issues file, merges included, must not add a duplicate comment id or a
+// dependency cycle that its parents do not already hold. Every
 // ID a Closes or Refs trailer names must exist in the working tree's issues
 // file, so an issue created for this commit counts. When
 // beadstools.requireTrailers is on (the default), a commit off the main branch
@@ -36,7 +36,7 @@ func CommitMsg(ctx context.Context, repo gitx.Repo, msgPath string) error {
 	if os.Getenv(SkipEnv) == "1" {
 		return nil
 	}
-	if err := checkStagedCommentIDs(ctx, repo); err != nil {
+	if err := checkStagedIssues(ctx, repo); err != nil {
 		return err
 	}
 	top, err := repo.TopLevel(ctx)
@@ -132,10 +132,9 @@ func stagedOnlyBeads(ctx context.Context, repo gitx.Repo) (bool, error) {
 	return true, nil
 }
 
-// checkStagedCommentIDs fails when the commit changes the issues file and the
-// staged version holds a duplicate comment id, which br refuses to import,
-// that no parent of the commit already holds on the same issues.
-func checkStagedCommentIDs(ctx context.Context, repo gitx.Repo) error {
+// checkStagedIssues applies the rules for the issues file to the staged
+// version when the commit changes it.
+func checkStagedIssues(ctx context.Context, repo gitx.Repo) error {
 	out, err := repo.Run(ctx, "diff", "--cached", "--name-only", "--", beadsfile.Path)
 	if err != nil {
 		return err
@@ -143,26 +142,50 @@ func checkStagedCommentIDs(ctx context.Context, repo gitx.Repo) error {
 	if strings.TrimSpace(out) == "" {
 		return nil
 	}
-	staged, ok, err := duplicatesAt(ctx, repo, "")
-	if err != nil || !ok || len(staged) == 0 {
+	staged, ok, err := issuesAt(ctx, repo, "")
+	if err != nil || !ok {
 		return err
 	}
-	parents, err := parentRevs(ctx, repo)
+	revs, err := parentRevs(ctx, repo)
 	if err != nil {
 		return err
 	}
-	inherited := map[string]bool{}
-	for _, rev := range parents {
-		dups, _, err := duplicatesAt(ctx, repo, rev)
+	parents := make([]*beadsfile.File, 0, len(revs))
+	for _, rev := range revs {
+		f, ok, err := issuesAt(ctx, repo, rev)
 		if err != nil {
 			return err
 		}
-		for _, d := range dups {
+		if !ok {
+			f = &beadsfile.File{}
+		}
+		parents = append(parents, f)
+	}
+	if err := checkCommentIDs(staged, parents); err != nil {
+		return err
+	}
+	return checkCycles(staged, parents)
+}
+
+// checkCommentIDs fails when staged holds a duplicate comment id, which br
+// refuses to import, that no parent already holds on the same issues.
+func checkCommentIDs(staged *beadsfile.File, parents []*beadsfile.File) error {
+	dups, err := staged.DuplicateCommentIDs()
+	if err != nil || len(dups) == 0 {
+		return err
+	}
+	inherited := map[string]bool{}
+	for _, p := range parents {
+		pdups, err := p.DuplicateCommentIDs()
+		if err != nil {
+			return err
+		}
+		for _, d := range pdups {
 			inherited[duplicateKey(d)] = true
 		}
 	}
 	var lines []string
-	for _, d := range staged {
+	for _, d := range dups {
 		if !inherited[duplicateKey(d)] {
 			lines = append(lines, "    "+d.String())
 		}
@@ -174,9 +197,27 @@ func checkStagedCommentIDs(ctx context.Context, repo gitx.Repo) error {
 		"Renumber all but one comment for each id.", beadsfile.Path, strings.Join(lines, "\n"))).Err()
 }
 
-// duplicatesAt returns the duplicate comment ids in the issues file at rev, or
-// in the index when rev is "". ok is false when rev has no issues file.
-func duplicatesAt(ctx context.Context, repo gitx.Repo, rev string) ([]beadsfile.DuplicateCommentID, bool, error) {
+// checkCycles fails when staged holds a dependency cycle, of any edge type,
+// that no parent holds; a cycle is compared by its edges.
+func checkCycles(staged *beadsfile.File, parents []*beadsfile.File) error {
+	cycles, err := beadsfile.NewCycles(staged, parents...)
+	if err != nil || len(cycles) == 0 {
+		return err
+	}
+	lines := make([]string, len(cycles))
+	for i, c := range cycles {
+		lines[i] = fmt.Sprintf("the staged %s adds a dependency cycle: %s.", beadsfile.Path, c)
+	}
+	fix := "Remove one edge, usually a related one, and say why in a comment on the bead."
+	if len(cycles) > 1 {
+		fix = "Remove one edge of each, usually a related one, and say why in a comment on the bead."
+	}
+	return errors.WithNew(strings.Join(lines, "\n") + " " + fix).Err()
+}
+
+// issuesAt parses the issues file at rev, or in the index when rev is "". ok
+// is false when rev has no issues file.
+func issuesAt(ctx context.Context, repo gitx.Repo, rev string) (*beadsfile.File, bool, error) {
 	data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
 	if err != nil || !ok {
 		return nil, false, err
@@ -185,8 +226,7 @@ func duplicatesAt(ctx context.Context, repo gitx.Repo, rev string) ([]beadsfile.
 	if err != nil {
 		return nil, false, errors.With(err, "reading issues file").Set("rev", rev).Err()
 	}
-	dups, err := issues.DuplicateCommentIDs()
-	return dups, true, err
+	return issues, true, nil
 }
 
 // parentRevs returns the commits the commit being made will have as parents:

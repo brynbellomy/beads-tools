@@ -404,8 +404,9 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 }
 
 // catchUpPR merges base into the worktree's head through the merge driver and
-// applies the landing rules to the result: no duplicate comment id, and every
-// commit since base names valid issues. It returns the head, its commits since
+// applies the landing rules to the result: no duplicate comment id, no
+// dependency cycle the base does not hold, and every commit since base names
+// valid issues. It returns the head, its commits since
 // base and its issues file.
 func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string, opts Options) (string, []trailers.Commit, *beadsfile.File, error) {
 	if err := w.catchUp(ctx, base, l.MergeDriver, "Merge "+base+" into "+pr.HeadRefName); err != nil {
@@ -424,6 +425,9 @@ func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string,
 		return "", nil, nil, err
 	}
 	if err := l.refuseDuplicateCommentIDs(issues, pr.HeadRefName); err != nil {
+		return "", nil, nil, err
+	}
+	if err := l.refuseNewCycles(ctx, base, sha, issues, pr.HeadRefName); err != nil {
 		return "", nil, nil, err
 	}
 	unlinked, err := FindUnlinked(ctx, l.Repo, commits, issues, !opts.TrailersOptional)
@@ -549,6 +553,20 @@ func (l *Lander) refuseDuplicateCommentIDs(issues *beadsfile.File, where string)
 		"If this branch never changed .beads/issues.jsonl it inherited them from the base branch unchanged (git runs the "+
 		"merge driver only when both sides changed the file): repair the base first with a .beads/-only pull request "+
 		"that renumbers all but one comment for each id, then land again", where, len(dups))).Err()
+}
+
+// refuseNewCycles fails when issues, the file at head, holds a dependency
+// cycle that base does not; a cycle the branch inherits lands.
+func (l *Lander) refuseNewCycles(ctx context.Context, base, head string, issues *beadsfile.File, where string) error {
+	cycles, err := cyclesAdded(ctx, l.Repo, base, head, issues)
+	if err != nil || len(cycles) == 0 {
+		return err
+	}
+	for _, c := range cycles {
+		l.printf("refuse %s: adds a dependency cycle: %s\n", where, c)
+	}
+	return errors.WithNew(fmt.Sprintf("the issues file on %s adds %d dependency cycle(s) that %s does not hold; remove one "+
+		"edge of each, usually a related one, say why in a comment on the bead, push, and land again", where, len(cycles), base)).Err()
 }
 
 // issuesAt parses the issues file as of rev.

@@ -35,13 +35,14 @@ usage:
         three-way merge issues files (git runs this as the merge driver);
         writes the result to OURS
   beads-tools hook commit-msg FILE
-        check a commit message's Closes:/Refs: trailers
+        check a commit message's Closes:/Refs: trailers; refuses a staged
+        issues file that adds duplicate comment ids or a dependency cycle
   beads-tools land pr NUMBER [--dry-run] [--no-merge] [--close ID]... [--keep-open]
                  [--require-trailers=BOOL]
         close the issues a pull request's commits close, on its branch,
         then merge it. issues it only references (Refs:) need a decision:
         --close each one it finishes, or --keep-open. refuses an issues file
-        with duplicate comment ids
+        with duplicate comment ids or a dependency cycle the base lacks
   beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN]
         close issues whose closing commits are already on the main branch,
         through a pull request
