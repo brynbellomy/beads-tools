@@ -24,7 +24,7 @@ three gaps:
 | `beads-tools hook commit-msg` | Checks a commit's `Closes:`/`Refs:` trailers (git runs it). |
 | `beads-tools land pr N` | Closes the issues PR *N* closes, on its branch, then merges it. |
 | `beads-tools land sweep` | Closes issues whose closing commits are already on the main branch. |
-| `beads-tools check` | Applies `land pr`'s trailer rules to a range of commits and refuses new dependency cycles, for CI. |
+| `beads-tools check` | Applies `land pr`'s rules to a range of commits, for CI. |
 
 ## Install
 
@@ -108,8 +108,28 @@ trailer, except for commits that change only `.beads/`, merges, and
 merges included, is rejected when the staged file holds a comment ID more
 than once, since br refuses to import such a file, unless a parent of the
 commit (HEAD, or the branch being merged) already holds that same ID on the
-same issues: merging a branch that carries duplicates is not blocked. Set `BEADS_TOOLS_SKIP=1`
-to skip the checks for one commit.
+same issues: merging a branch that carries duplicates is not blocked. It is
+also rejected when the staged file adds a [dependency
+cycle](#dependency-cycles) that no parent holds. Set `BEADS_TOOLS_SKIP=1` to
+skip the checks for one commit.
+
+## Dependency cycles
+
+The issue graph carries no dependency cycles of any edge type, and a change
+may not add one. The commit-msg hook, `land pr` and `check` each refuse a
+change whose issues file holds a cycle that its parents do not: for the hook
+the commit's parents, for `land pr` the base branch, for `check` `--base` and
+the merge base of `--base` and `--head`.
+
+A cycle is walked as `br dep cycles` walks it: a `parent-child` dependency
+from the parent to the child, every other type from the dependent issue to
+the one it depends on. Closed and tombstoned issues count. Cycles are
+compared by their edges, so a change that inherits a cycle passes however it
+edits the issues on it, and a change that adds an edge among those issues is
+refused only when that edge closes a new cycle. Each added cycle is printed
+as a path with every step's edge type, for example `t-a related to t-b, t-b
+waits on t-c (blocks), t-c parent of t-a`: remove one edge, usually a
+`related` one, and say why in a comment on the issue.
 
 ## Closing issues when work lands
 
@@ -121,7 +141,9 @@ idempotent.
 first brings the PR's head up to date with the base branch: when the head
 does not contain the base, it merges the base into the head, with this
 tool's merge driver handling the issues file whatever the repository's own
-git config says. It then applies the landing rules to that head, adds one
+git config says. It then applies the landing rules to that head (valid
+trailers, no duplicate comment ID, no [dependency
+cycle](#dependency-cycles) the base does not hold), adds one
 commit that closes the issues the PR's `Closes:` trailers name, pushes the
 result to the PR's branch (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. Right
@@ -185,20 +207,9 @@ beads-tools check --base origin/main --head HEAD    # explicit range
 ```
 
 It reads the issues file at `--head`, prints each offending commit, each
-comment ID that file holds more than once and each dependency cycle the range
-adds, and exits 1 when any commit fails the rules, any comment ID is
-duplicated or any cycle is added (2 on errors).
-
-The issue graph carries no dependency cycles of any edge type. A cycle is
-walked as `br dep cycles` walks it: a `parent-child` dependency from the
-parent to the child, every other type from the dependent issue to the one it
-depends on. Closed and tombstoned issues count. Cycles are compared by their
-edges, and the head adds a cycle when neither `--base` nor the merge base of
-`--base` and `--head` holds all of its edges, so a cycle the range inherits
-passes however the range edits the issues on it. Each added cycle is printed
-as a path with every step's edge type, for example `t-a related to t-b, t-b
-waits on t-c (blocks), t-c parent of t-a`: remove one edge, usually a
-`related` one, and say why in a comment on the issue.
+comment ID that file holds more than once and each [dependency
+cycle](#dependency-cycles) the range adds, and exits 1 when any commit fails
+the rules, any comment ID is duplicated or any cycle is added (2 on errors).
 `--require-trailers=BOOL` overrides `beadstools.requireTrailers` for one
 run. On a GitHub pull request
 the checked-out HEAD is a synthetic merge commit, which counts as a merge and
