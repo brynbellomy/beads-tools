@@ -50,10 +50,12 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 }
 
 // Check applies the landing rules to the commits in base..head against the
-// issues file at head, printing each offender to out, and fails on a comment
-// id the file at head holds more than once. It notes, without failing, each
-// issue the range references but neither closes nor finds closed. It reports whether the range may
-// land. It needs only git, so CI can run it.
+// issues file at head, printing each offender to out. It fails on a comment
+// id the file at head holds more than once, and on a dependency cycle head
+// holds that neither base nor the merge base of the two does. It notes,
+// without failing, each issue the range references but neither closes nor
+// finds closed. It reports whether the range may land. It needs only git, so
+// CI can run it.
 func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTrailers bool, out io.Writer) (bool, error) {
 	commits, err := trailers.Log(ctx, repo, base+".."+head)
 	if err != nil {
@@ -71,8 +73,15 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	if err != nil {
 		return false, err
 	}
+	cycles, err := cyclesAdded(ctx, repo, base, head, issues)
+	if err != nil {
+		return false, err
+	}
 	for _, d := range dups {
 		fmt.Fprintf(out, "%s at %s: %s\n", beadsfile.Path, head, d)
+	}
+	for _, c := range cycles {
+		fmt.Fprintf(out, "%s at %s adds a dependency cycle: %s\n", beadsfile.Path, head, c)
 	}
 	for _, u := range unlinked {
 		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
@@ -91,11 +100,38 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	if len(unlinked) > 0 {
 		fmt.Fprintf(out, "%d of %d commit(s) do not name a valid issue; reword them to end with a Closes: or Refs: trailer\n", len(unlinked), len(commits))
 	}
-	if len(unlinked) > 0 || len(dups) > 0 {
+	if len(cycles) > 0 {
+		fmt.Fprintf(out, "%s at %s adds %d dependency cycle(s); remove one edge of each, usually a related one, and say why in a comment on the bead\n", beadsfile.Path, head, len(cycles))
+	}
+	if len(unlinked) > 0 || len(dups) > 0 || len(cycles) > 0 {
 		return false, nil
 	}
 	fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
 	return true, nil
+}
+
+// cyclesAdded returns the dependency cycles issues, the file at head, holds
+// and neither base nor the merge base of base and head holds.
+func cyclesAdded(ctx context.Context, repo gitx.Repo, base, head string, issues *beadsfile.File) ([]beadsfile.Cycle, error) {
+	revs := []string{base}
+	if mb, err := repo.Run(ctx, "merge-base", base, head); err == nil {
+		revs = append(revs, strings.TrimSpace(mb))
+	}
+	parents := make([]*beadsfile.File, 0, len(revs))
+	for _, rev := range revs {
+		data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
+		if err != nil {
+			return nil, err
+		}
+		f := &beadsfile.File{}
+		if ok {
+			if f, err = beadsfile.Parse(strings.NewReader(data)); err != nil {
+				return nil, err
+			}
+		}
+		parents = append(parents, f)
+	}
+	return beadsfile.NewCycles(issues, parents...)
 }
 
 func onlyTouchesBeads(ctx context.Context, repo gitx.Repo, sha string) (bool, error) {

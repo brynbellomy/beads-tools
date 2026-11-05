@@ -48,8 +48,9 @@ usage:
   beads-tools check [--base REV] [--head REV] [--require-trailers=BOOL]
         apply land pr's trailer rules to base..head (default: the main
         branch on the remote, and HEAD) and its duplicate comment id check to
-        the issues file at head; exits 1 when either fails. Needs only git,
-        for CI.
+        the issues file at head, and refuses a dependency cycle head adds
+        that neither base nor the merge base holds; exits 1 when any fails.
+        Needs only git, for CI.
 
 --require-trailers overrides beadstools.requireTrailers for one run.
 

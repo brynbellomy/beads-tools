@@ -24,7 +24,7 @@ three gaps:
 | `beads-tools hook commit-msg` | Checks a commit's `Closes:`/`Refs:` trailers (git runs it). |
 | `beads-tools land pr N` | Closes the issues PR *N* closes, on its branch, then merges it. |
 | `beads-tools land sweep` | Closes issues whose closing commits are already on the main branch. |
-| `beads-tools check` | Applies `land pr`'s trailer rules to a range of commits, for CI. |
+| `beads-tools check` | Applies `land pr`'s trailer rules to a range of commits and refuses new dependency cycles, for CI. |
 
 ## Install
 
@@ -184,9 +184,21 @@ beads-tools check                                   # <remote>/<main>..HEAD
 beads-tools check --base origin/main --head HEAD    # explicit range
 ```
 
-It reads the issues file at `--head`, prints each offending commit and each
-comment ID that file holds more than once, and exits 1 when any commit fails
-the rules or any comment ID is duplicated (2 on errors).
+It reads the issues file at `--head`, prints each offending commit, each
+comment ID that file holds more than once and each dependency cycle the range
+adds, and exits 1 when any commit fails the rules, any comment ID is
+duplicated or any cycle is added (2 on errors).
+
+The issue graph carries no dependency cycles of any edge type. A cycle is
+walked as `br dep cycles` walks it: a `parent-child` dependency from the
+parent to the child, every other type from the dependent issue to the one it
+depends on. Closed and tombstoned issues count. Cycles are compared by their
+edges, and the head adds a cycle when neither `--base` nor the merge base of
+`--base` and `--head` holds all of its edges, so a cycle the range inherits
+passes however the range edits the issues on it. Each added cycle is printed
+as a path with every step's edge type, for example `t-a related to t-b, t-b
+waits on t-c (blocks), t-c parent of t-a`: remove one edge, usually a
+`related` one, and say why in a comment on the issue.
 `--require-trailers=BOOL` overrides `beadstools.requireTrailers` for one
 run. On a GitHub pull request
 the checked-out HEAD is a synthetic merge commit, which counts as a merge and
