@@ -2,6 +2,7 @@ package beadsfile
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,4 +53,39 @@ func (f *File) DuplicateCommentIDs() ([]DuplicateCommentID, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// NewDuplicateCommentIDs splits head's duplicate comment ids into those no
+// file in parents holds (added) and those one does (inherited). A parent holds
+// a duplicate when it carries the same id on the same issues.
+func NewDuplicateCommentIDs(head *File, parents ...*File) (added, inherited []DuplicateCommentID, err error) {
+	dups, err := head.DuplicateCommentIDs()
+	if err != nil || len(dups) == 0 {
+		return nil, nil, err
+	}
+	held := map[string]bool{}
+	for _, p := range parents {
+		pd, err := p.DuplicateCommentIDs()
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, d := range pd {
+			held[d.key()] = true
+		}
+	}
+	for _, d := range dups {
+		if held[d.key()] {
+			inherited = append(inherited, d)
+		} else {
+			added = append(added, d)
+		}
+	}
+	return added, inherited, nil
+}
+
+// key names a duplicate by its id and the issues that share it.
+func (d DuplicateCommentID) key() string {
+	issues := slices.Clone(d.Issues)
+	slices.Sort(issues)
+	return strconv.FormatInt(d.ID, 10) + ":" + strings.Join(issues, ",")
 }

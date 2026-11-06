@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/brynbellomy/go-utils/errors"
@@ -170,28 +168,13 @@ func checkStagedIssues(ctx context.Context, repo gitx.Repo) error {
 // checkCommentIDs fails when staged holds a duplicate comment id, which br
 // refuses to import, that no parent already holds on the same issues.
 func checkCommentIDs(staged *beadsfile.File, parents []*beadsfile.File) error {
-	dups, err := staged.DuplicateCommentIDs()
-	if err != nil || len(dups) == 0 {
+	added, _, err := beadsfile.NewDuplicateCommentIDs(staged, parents...)
+	if err != nil || len(added) == 0 {
 		return err
 	}
-	inherited := map[string]bool{}
-	for _, p := range parents {
-		pdups, err := p.DuplicateCommentIDs()
-		if err != nil {
-			return err
-		}
-		for _, d := range pdups {
-			inherited[duplicateKey(d)] = true
-		}
-	}
-	var lines []string
-	for _, d := range dups {
-		if !inherited[duplicateKey(d)] {
-			lines = append(lines, "    "+d.String())
-		}
-	}
-	if len(lines) == 0 {
-		return nil
+	lines := make([]string, len(added))
+	for i, d := range added {
+		lines[i] = "    " + d.String()
 	}
 	return errors.WithNew(fmt.Sprintf("the staged %s adds duplicate comment ids, which br refuses to import:\n%s\n"+
 		"Renumber all but one comment for each id.", beadsfile.Path, strings.Join(lines, "\n"))).Err()
@@ -248,11 +231,4 @@ func parentRevs(ctx context.Context, repo gitx.Repo) ([]string, error) {
 		return nil, errors.With(err, "reading MERGE_HEAD").Err()
 	}
 	return append(revs, strings.Fields(string(data))...), nil
-}
-
-// duplicateKey names a duplicate by its id and the issues that share it.
-func duplicateKey(d beadsfile.DuplicateCommentID) string {
-	issues := slices.Clone(d.Issues)
-	slices.Sort(issues)
-	return strconv.FormatInt(d.ID, 10) + ":" + strings.Join(issues, ",")
 }

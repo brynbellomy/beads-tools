@@ -117,19 +117,9 @@ func cyclesAdded(ctx context.Context, repo gitx.Repo, base, head string, issues 
 	if mb, err := repo.Run(ctx, "merge-base", base, head); err == nil {
 		revs = append(revs, strings.TrimSpace(mb))
 	}
-	parents := make([]*beadsfile.File, 0, len(revs))
-	for _, rev := range revs {
-		data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
-		if err != nil {
-			return nil, err
-		}
-		f := &beadsfile.File{}
-		if ok {
-			if f, err = beadsfile.Parse(strings.NewReader(data)); err != nil {
-				return nil, err
-			}
-		}
-		parents = append(parents, f)
+	parents, err := filesAt(ctx, repo, revs)
+	if err != nil {
+		return nil, err
 	}
 	return beadsfile.NewCycles(issues, parents...)
 }

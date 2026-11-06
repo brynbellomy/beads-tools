@@ -270,7 +270,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 		if err != nil {
 			return "", err
 		}
-		if err := l.refuseDuplicateCommentIDs(issues, branch); err != nil {
+		if err := l.refuseNewDuplicateCommentIDs(ctx, issues, branch, ref); err != nil {
 			return "", err
 		}
 		return sha, l.push(ctx, remote, sha, branch)
@@ -404,10 +404,10 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 }
 
 // catchUpPR merges base into the worktree's head through the merge driver and
-// applies the landing rules to the result: no duplicate comment id, no
-// dependency cycle the base does not hold, and every commit since base names
-// valid issues. It returns the head, its commits since
-// base and its issues file.
+// applies the landing rules to the result: no duplicate comment id that
+// neither the base nor the PR's head holds, no dependency cycle the base does
+// not hold, and every commit since base names valid issues. It returns the
+// head, its commits since base and its issues file.
 func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string, opts Options) (string, []trailers.Commit, *beadsfile.File, error) {
 	if err := w.catchUp(ctx, base, l.MergeDriver, "Merge "+base+" into "+pr.HeadRefName); err != nil {
 		return "", nil, nil, err
@@ -424,7 +424,7 @@ func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string,
 	if err != nil {
 		return "", nil, nil, err
 	}
-	if err := l.refuseDuplicateCommentIDs(issues, pr.HeadRefName); err != nil {
+	if err := l.refuseNewDuplicateCommentIDs(ctx, issues, pr.HeadRefName, base, pr.HeadRefOid); err != nil {
 		return "", nil, nil, err
 	}
 	if err := l.refuseNewCycles(ctx, base, sha, issues, pr.HeadRefName); err != nil {
@@ -536,23 +536,32 @@ func pause(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// refuseDuplicateCommentIDs fails when issues holds a comment id more than
-// once, which br refuses to import.
-func (l *Lander) refuseDuplicateCommentIDs(issues *beadsfile.File, where string) error {
-	dups, err := issues.DuplicateCommentIDs()
+// refuseNewDuplicateCommentIDs fails when issues, the file land is about to
+// publish as where, holds a duplicate comment id that no file at parents
+// holds; br refuses to import such a file. A duplicate a parent already holds
+// only warns, so a branch is not blocked by one it inherited.
+func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beadsfile.File, where string, parents ...string) error {
+	files, err := filesAt(ctx, l.Repo, parents)
 	if err != nil {
 		return err
 	}
-	if len(dups) == 0 {
+	added, inherited, err := beadsfile.NewDuplicateCommentIDs(issues, files...)
+	if err != nil {
+		return err
+	}
+	for _, d := range inherited {
+		l.printf("warning: %s inherits %s; br refuses to import the file until a .beads/-only pull request "+
+			"renumbers all but one comment for each id\n", where, d)
+	}
+	if len(added) == 0 {
 		return nil
 	}
-	for _, d := range dups {
+	for _, d := range added {
 		l.printf("refuse %s: %s\n", where, d)
 	}
-	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s); br refuses to import it. "+
-		"If this branch never changed .beads/issues.jsonl it inherited them from the base branch unchanged (git runs the "+
-		"merge driver only when both sides changed the file): repair the base first with a .beads/-only pull request "+
-		"that renumbers all but one comment for each id, then land again", where, len(dups))).Err()
+	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s) that neither %s holds; "+
+		"br refuses to import it. Merge the base branch into the branch locally with the beads-tools merge driver "+
+		"installed, which renumbers them, push, and land again", where, len(added), strings.Join(parents, " nor "))).Err()
 }
 
 // refuseNewCycles fails when issues, the file at head, holds a dependency
@@ -579,6 +588,26 @@ func issuesAt(ctx context.Context, repo gitx.Repo, rev string) (*beadsfile.File,
 		return nil, errors.WithNew("no issues file at revision").Set("rev", rev, "path", beadsfile.Path).Err()
 	}
 	return beadsfile.Parse(strings.NewReader(data))
+}
+
+// filesAt parses the issues file at each of revs; a rev without one counts as
+// an empty file.
+func filesAt(ctx context.Context, repo gitx.Repo, revs []string) ([]*beadsfile.File, error) {
+	files := make([]*beadsfile.File, 0, len(revs))
+	for _, rev := range revs {
+		data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
+		if err != nil {
+			return nil, err
+		}
+		f := &beadsfile.File{}
+		if ok {
+			if f, err = beadsfile.Parse(strings.NewReader(data)); err != nil {
+				return nil, err
+			}
+		}
+		files = append(files, f)
+	}
+	return files, nil
 }
 
 func title(planned []Planned) string {

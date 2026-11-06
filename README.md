@@ -142,8 +142,9 @@ first brings the PR's head up to date with the base branch: when the head
 does not contain the base, it merges the base into the head, with this
 tool's merge driver handling the issues file whatever the repository's own
 git config says. It then applies the landing rules to that head (valid
-trailers, no duplicate comment ID, no [dependency
-cycle](#dependency-cycles) the base does not hold), adds one
+trailers, no duplicate comment ID that neither the base nor the PR's head
+holds on the same issues, no [dependency cycle](#dependency-cycles) the base
+does not hold), adds one
 commit that closes the issues the PR's `Closes:` trailers name, pushes the
 result to the PR's branch (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. Right
@@ -153,7 +154,11 @@ more. GitHub merges server-side without custom merge drivers, but while the
 head contains the base, its merge takes the head's issues file as it is.
 The work and its closes reach the main branch in the same merge. A merge
 conflict outside `.beads/` while bringing the head up to date stops the
-landing; merge the base by hand, push, and land again.
+landing; merge the base by hand, push, and land again. A duplicate comment
+ID the head inherits from the base or already held does not stop the
+landing; `land pr` prints a warning for it, and a `.beads/`-only pull
+request that renumbers all but one comment for each ID repairs it. `land
+sweep` applies the same rule against the base branch.
 
 One window remains: if the base moves in the moment between that last read
 of its tip and GitHub's merge, and GitHub does not refuse, GitHub merges the
