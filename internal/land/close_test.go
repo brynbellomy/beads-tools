@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/brynbellomy/beads-tools/internal/beadsfile"
 	"github.com/brynbellomy/beads-tools/internal/land"
 	"github.com/brynbellomy/beads-tools/internal/land/mocks"
 	"github.com/brynbellomy/beads-tools/internal/testrepo"
@@ -36,7 +37,7 @@ func TestCloseInTree_KeepsRowsBrWouldRewrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(probed), bystander, "br rewrites the bystander; otherwise this test proves nothing")
 
-	changed, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: id, Reason: "Closed by abc"}}, land.BR{})
+	changed, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: id, Reason: "Closed by abc"}}, land.BR{}, &beadsfile.File{})
 	require.NoError(t, err)
 	require.Equal(t, []string{id}, changed)
 
@@ -64,7 +65,7 @@ func TestCloseInTree_AlreadyClosedIsANoOp(t *testing.T) {
 	before, err := os.ReadFile(filepath.Join(r.Dir, ".beads", "issues.jsonl"))
 	require.NoError(t, err)
 
-	changed, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: id, Reason: "again"}}, land.BR{})
+	changed, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: id, Reason: "again"}}, land.BR{}, &beadsfile.File{})
 	require.NoError(t, err)
 	require.Empty(t, changed)
 	after, err := os.ReadFile(filepath.Join(r.Dir, ".beads", "issues.jsonl"))
@@ -108,7 +109,7 @@ func TestCloseInTree_RefusesWhatBrGetsWrong(t *testing.T) {
 			path := filepath.Join(dir, ".beads", "issues.jsonl")
 			require.NoError(t, os.WriteFile(path, []byte(orig), 0o644))
 
-			_, err := land.CloseInTree(context.Background(), dir, []land.Close{{ID: "t-a", Reason: "r"}}, rewriteBeads(t, tc.edit))
+			_, err := land.CloseInTree(context.Background(), dir, []land.Close{{ID: "t-a", Reason: "r"}}, rewriteBeads(t, tc.edit), &beadsfile.File{})
 
 			require.ErrorContains(t, err, tc.want)
 			data, err := os.ReadFile(path)
@@ -121,6 +122,6 @@ func TestCloseInTree_RefusesWhatBrGetsWrong(t *testing.T) {
 func TestCloseInTree_UnknownIssueFails(t *testing.T) {
 	r := testrepo.New(t, "")
 	r.Create("x")
-	_, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: "t-nope", Reason: "r"}}, land.BR{})
+	_, err := land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: "t-nope", Reason: "r"}}, land.BR{}, &beadsfile.File{})
 	require.ErrorContains(t, err, "not found")
 }

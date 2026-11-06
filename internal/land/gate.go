@@ -50,9 +50,10 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 }
 
 // Check applies the landing rules to the commits in base..head against the
-// issues file at head, printing each offender to out. It fails on a comment
-// id the file at head holds more than once, and on a dependency cycle head
-// holds that neither base nor the merge base of the two does. It notes,
+// issues file at head, printing each offender to out. It fails on a
+// duplicate comment id head holds and base does not, warning of those base
+// holds too, and on a dependency cycle head holds that neither base nor the
+// merge base of the two does. It notes,
 // without failing, each issue the range references but neither closes nor
 // finds closed. It reports whether the range may land. It needs only git, so
 // CI can run it.
@@ -69,13 +70,20 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	if err != nil {
 		return false, err
 	}
-	dups, err := issues.DuplicateCommentIDs()
+	baseFiles, err := filesAt(ctx, repo, []string{base})
+	if err != nil {
+		return false, err
+	}
+	dups, inherited, err := beadsfile.NewDuplicateCommentIDs(issues, baseFiles...)
 	if err != nil {
 		return false, err
 	}
 	cycles, err := cyclesAdded(ctx, repo, base, head, issues)
 	if err != nil {
 		return false, err
+	}
+	for _, d := range inherited {
+		fmt.Fprintf(out, "warning: %s at %s inherits %s from %s\n", beadsfile.Path, head, d, base)
 	}
 	for _, d := range dups {
 		fmt.Fprintf(out, "%s at %s: %s\n", beadsfile.Path, head, d)
@@ -95,7 +103,7 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 		fmt.Fprintf(out, "note: %s is referenced by %s %s but nothing closes it; end the finishing commit with Closes: %s\n", r.ID, short(r.Commit.SHA), r.Commit.Subject, r.ID)
 	}
 	if len(dups) > 0 {
-		fmt.Fprintf(out, "%s at %s holds %d duplicate comment id(s), which br refuses to import\n", beadsfile.Path, head, len(dups))
+		fmt.Fprintf(out, "%s at %s holds %d duplicate comment id(s) that %s does not, which br refuses to import\n", beadsfile.Path, head, len(dups), base)
 	}
 	if len(unlinked) > 0 {
 		fmt.Fprintf(out, "%d of %d commit(s) do not name a valid issue; reword them to end with a Closes: or Refs: trailer\n", len(unlinked), len(commits))

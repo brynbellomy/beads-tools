@@ -132,7 +132,34 @@ func TestCheck_FailsOnDuplicateCommentIDs(t *testing.T) {
 	code, out := runCheck(t, r.Dir, "--base", base)
 	require.Equal(t, cli.ExitConflict, code, out)
 	require.Contains(t, out, "comment id 7 is used 2 times (t-da, t-db)")
-	require.Contains(t, out, "1 duplicate comment id(s)")
+	require.Contains(t, out, "1 duplicate comment id(s) that "+base+" does not")
+}
+
+func TestCheck_WarnsOfDuplicateCommentIDsTheBaseHolds(t *testing.T) {
+	r := testrepo.New(t, "")
+	id := r.Create("task")
+	path := filepath.Join(r.Dir, ".beads", "issues.jsonl")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	row := func(issue string) string {
+		return `{"id":"` + issue + `","title":"x","comments":[{"id":7,"issue_id":"` + issue + `","author":"x","text":"n","created_at":"2026-01-01T00:00:00Z"}]}` + "\n"
+	}
+	r.Write(".beads/issues.jsonl", string(data)+row("t-da")+row("t-db"))
+	base := r.Commit("beads: the base holds a duplicate")
+	r.Write("a.go", "package a\n")
+	r.Commit("feat: a\n\nRefs: " + id)
+
+	code, out := runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "warning: .beads/issues.jsonl at HEAD inherits comment id 7 is used 2 times (t-da, t-db) from "+base)
+
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	r.Write(".beads/issues.jsonl", string(data)+row("t-dc"))
+	r.Commit("beads: a third use\n\nRefs: " + id)
+	code, out = runCheck(t, r.Dir, "--base", base)
+	require.Equal(t, cli.ExitConflict, code, "another use of an inherited id is a new duplicate: %s", out)
+	require.Contains(t, out, "comment id 7 is used 3 times (t-da, t-db, t-dc)")
 }
 
 // fakeGH puts a gh on PATH that answers pr view for one pull request and

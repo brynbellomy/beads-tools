@@ -72,7 +72,7 @@ func TestPR_LandsWithDuplicatesInheritedFromTheBase(t *testing.T) {
 	require.Equal(t, "closed", r.Status(*merged, work))
 }
 
-func TestPR_WarnsOfDuplicatesTheBranchAlreadyHolds(t *testing.T) {
+func TestPR_RefusesDuplicatesTheBranchAdds(t *testing.T) {
 	r, _, head := prRepo(t, func(r *testrepo.Repo, id string) {
 		duplicateComment(t, r, 7)
 		r.Commit("beads: import")
@@ -80,10 +80,14 @@ func TestPR_WarnsOfDuplicatesTheBranchAlreadyHolds(t *testing.T) {
 		r.Commit("feat: a\n\nCloses: " + id)
 	})
 
-	gh, _ := viewAndMerge(t, head)
-	var out bytes.Buffer
-	require.NoError(t, lander(r, gh, &out).PR(context.Background(), 3, land.Options{}), out.String())
-	require.Contains(t, out.String(), "warning: feat/g inherits comment id 7 is used 2 times (")
+	for _, opts := range []land.Options{{}, {DryRun: true}} {
+		var out bytes.Buffer
+		err := lander(r, viewOnly(t, head), &out).PR(context.Background(), 3, opts)
+		require.ErrorContains(t, err, "holds 1 duplicate comment id(s) that origin/main does not")
+		require.Contains(t, out.String(), "refuse feat/g: comment id 7 is used 2 times (")
+	}
+	r.G("fetch", "-q", "origin")
+	require.Equal(t, head, r.G("rev-parse", "origin/feat/g"), "a refused landing pushes nothing")
 }
 
 // Two PRs each add comment 50 on a different issue. A text merge of the
@@ -113,8 +117,8 @@ func TestPR_RefusesDuplicatesTheMergeAdds(t *testing.T) {
 	l.MergeDriver = textDriver
 	err := l.PR(context.Background(), 3, land.Options{})
 
-	require.ErrorContains(t, err, "holds 1 duplicate comment id(s) that neither origin/main nor "+head+" holds")
-	require.ErrorContains(t, err, "Merge the base branch into the branch locally")
+	require.ErrorContains(t, err, "holds 1 duplicate comment id(s) that origin/main does not")
+	require.ErrorContains(t, err, "merge the base branch into the branch locally")
 	require.Contains(t, out.String(), "refuse feat/g: comment id 50 is used 2 times (")
 	r.G("fetch", "-q", "origin")
 	require.Equal(t, head, r.G("rev-parse", "origin/feat/g"), "a refused landing pushes nothing")
@@ -136,7 +140,7 @@ func TestCloseInTree_RefusesToWriteADuplicateCommentID(t *testing.T) {
 			return os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(other+"\n"+closed+"\n"), 0o644)
 		})
 
-	_, err = land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: "t-c", Reason: "done"}}, beads)
+	_, err = land.CloseInTree(context.Background(), r.Dir, []land.Close{{ID: "t-c", Reason: "done"}}, beads, &beadsfile.File{})
 	require.ErrorContains(t, err, "duplicate comment id")
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)

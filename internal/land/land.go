@@ -237,7 +237,7 @@ func (l *Lander) Sweep(ctx context.Context, opts Options) error {
 		return err
 	}
 	defer l.closeWorktree(ctx, w)
-	if err := l.commitCloses(ctx, w, planned); err != nil {
+	if err := l.commitCloses(ctx, w, planned, ref); err != nil {
 		return err
 	}
 	sha, err := w.head(ctx)
@@ -371,7 +371,7 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 	}
 
 	if len(planned) > 0 {
-		if err := l.commitCloses(ctx, w, planned); err != nil {
+		if err := l.commitCloses(ctx, w, planned, base); err != nil {
 			return err
 		}
 		if sha, err = w.head(ctx); err != nil {
@@ -404,10 +404,10 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 }
 
 // catchUpPR merges base into the worktree's head through the merge driver and
-// applies the landing rules to the result: no duplicate comment id that
-// neither the base nor the PR's head holds, no dependency cycle the base does
-// not hold, and every commit since base names valid issues. It returns the
-// head, its commits since base and its issues file.
+// applies the landing rules to the result: no duplicate comment id or
+// dependency cycle the base does not hold, and every commit since base names
+// valid issues. It returns the head, its commits since base and its issues
+// file.
 func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string, opts Options) (string, []trailers.Commit, *beadsfile.File, error) {
 	if err := w.catchUp(ctx, base, l.MergeDriver, "Merge "+base+" into "+pr.HeadRefName); err != nil {
 		return "", nil, nil, err
@@ -424,7 +424,7 @@ func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string,
 	if err != nil {
 		return "", nil, nil, err
 	}
-	if err := l.refuseNewDuplicateCommentIDs(ctx, issues, pr.HeadRefName, base, pr.HeadRefOid); err != nil {
+	if err := l.refuseNewDuplicateCommentIDs(ctx, issues, pr.HeadRefName, base); err != nil {
 		return "", nil, nil, err
 	}
 	if err := l.refuseNewCycles(ctx, base, sha, issues, pr.HeadRefName); err != nil {
@@ -537,11 +537,11 @@ func pause(ctx context.Context, d time.Duration) error {
 }
 
 // refuseNewDuplicateCommentIDs fails when issues, the file land is about to
-// publish as where, holds a duplicate comment id that no file at parents
-// holds; br refuses to import such a file. A duplicate a parent already holds
-// only warns, so a branch is not blocked by one it inherited.
-func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beadsfile.File, where string, parents ...string) error {
-	files, err := filesAt(ctx, l.Repo, parents)
+// publish as where, holds a duplicate comment id that the issues file at base
+// does not; br refuses to import such a file. A duplicate the base already
+// holds only warns, so a branch is not blocked by one it inherited.
+func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beadsfile.File, where, base string) error {
+	files, err := filesAt(ctx, l.Repo, []string{base})
 	if err != nil {
 		return err
 	}
@@ -550,8 +550,8 @@ func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beads
 		return err
 	}
 	for _, d := range inherited {
-		l.printf("warning: %s inherits %s; br refuses to import the file until a .beads/-only pull request "+
-			"renumbers all but one comment for each id\n", where, d)
+		l.printf("warning: %s inherits %s from %s; br refuses to import the file until a .beads/-only pull request "+
+			"renumbers all but one comment for each id\n", where, d, base)
 	}
 	if len(added) == 0 {
 		return nil
@@ -559,9 +559,10 @@ func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beads
 	for _, d := range added {
 		l.printf("refuse %s: %s\n", where, d)
 	}
-	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s) that neither %s holds; "+
-		"br refuses to import it. Merge the base branch into the branch locally with the beads-tools merge driver "+
-		"installed, which renumbers them, push, and land again", where, len(added), strings.Join(parents, " nor "))).Err()
+	return errors.WithNew(fmt.Sprintf("the issues file on %s holds %d duplicate comment id(s) that %s does not; "+
+		"br refuses to import it. Renumber all but one comment for each id on the branch, or, if a text merge made "+
+		"them, merge the base branch into the branch locally with the beads-tools merge driver installed; push, "+
+		"and land again", where, len(added), base)).Err()
 }
 
 // refuseNewCycles fails when issues, the file at head, holds a dependency

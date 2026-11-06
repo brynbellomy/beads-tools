@@ -53,8 +53,10 @@ func IsClosed(iss *beadsfile.Issue) bool {
 //
 // br rewrites rows it was not asked to touch when it exports (comment IDs,
 // timestamp formatting), so br runs on a scratch copy and only the rows for the
-// requested issues are spliced back. Every other line keeps its bytes.
-func CloseInTree(ctx context.Context, root string, closes []Close, beads Beads) ([]string, error) {
+// requested issues are spliced back. Every other line keeps its bytes. The
+// result may hold no duplicate comment id that base, the issues file of the
+// base branch, does not.
+func CloseInTree(ctx context.Context, root string, closes []Close, beads Beads, base *beadsfile.File) ([]string, error) {
 	path := filepath.Join(root, beadsfile.Path)
 	orig, err := beadsfile.ParseFile(path)
 	if err != nil {
@@ -125,7 +127,7 @@ func CloseInTree(ctx context.Context, root string, closes []Close, beads Beads) 
 	if err != nil {
 		return nil, err
 	}
-	added, _, err := beadsfile.NewDuplicateCommentIDs(f, orig)
+	added, _, err := beadsfile.NewDuplicateCommentIDs(f, base)
 	if err != nil {
 		return nil, err
 	}

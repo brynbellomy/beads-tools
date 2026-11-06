@@ -99,13 +99,18 @@ func (w *worktree) catchUp(ctx context.Context, ref, driver, message string) err
 }
 
 // commitCloses closes the planned issues in the worktree and commits only the
-// issues file.
-func (l *Lander) commitCloses(ctx context.Context, w *worktree, planned []Planned) error {
+// issues file. A duplicate comment id the issues file at base does not hold
+// refuses the close.
+func (l *Lander) commitCloses(ctx context.Context, w *worktree, planned []Planned, base string) error {
 	closes := make([]Close, len(planned))
 	for i, p := range planned {
 		closes[i] = p.Close
 	}
-	changed, err := CloseInTree(ctx, w.git.Dir, closes, l.Beads)
+	files, err := filesAt(ctx, l.Repo, []string{base})
+	if err != nil {
+		return err
+	}
+	changed, err := CloseInTree(ctx, w.git.Dir, closes, l.Beads, files[0])
 	if err != nil {
 		return err
 	}

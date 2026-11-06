@@ -142,9 +142,8 @@ first brings the PR's head up to date with the base branch: when the head
 does not contain the base, it merges the base into the head, with this
 tool's merge driver handling the issues file whatever the repository's own
 git config says. It then applies the landing rules to that head (valid
-trailers, no duplicate comment ID that neither the base nor the PR's head
-holds on the same issues, no [dependency cycle](#dependency-cycles) the base
-does not hold), adds one
+trailers, no duplicate comment ID the base does not hold on the same issues,
+no [dependency cycle](#dependency-cycles) the base does not hold), adds one
 commit that closes the issues the PR's `Closes:` trailers name, pushes the
 result to the PR's branch (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. Right
@@ -155,10 +154,11 @@ head contains the base, its merge takes the head's issues file as it is.
 The work and its closes reach the main branch in the same merge. A merge
 conflict outside `.beads/` while bringing the head up to date stops the
 landing; merge the base by hand, push, and land again. A duplicate comment
-ID the head inherits from the base or already held does not stop the
-landing; `land pr` prints a warning for it, and a `.beads/`-only pull
-request that renumbers all but one comment for each ID repairs it. `land
-sweep` applies the same rule against the base branch.
+ID the base already holds does not stop the landing; `land pr` prints a
+warning for it, and a `.beads/`-only pull request that renumbers all but one
+comment for each ID repairs it. Any other duplicate, including one the
+branch adds itself, refuses the landing. `land sweep` and the commit that
+closes the issues apply the same rule against the base branch.
 
 One window remains: if the base moves in the moment between that last read
 of its tip and GitHub's merge, and GitHub does not refuse, GitHub merges the
@@ -199,8 +199,8 @@ reverts and `.beads/`-only commits are exempt). It lists the offending
 commits; reword them, push, and land again. `--require-trailers=false` (or
 `=true`) overrides `beadstools.requireTrailers` for one run; trailers that
 name a missing issue still refuse the landing. `land pr` also refuses a PR
-whose issues file holds a comment ID more than once. `--dry-run` reports the
-same refusals.
+whose issues file holds a duplicate comment ID the base does not. `--dry-run`
+reports the same refusals.
 
 **`beads-tools check`** applies the same rules without `gh` or `br`, so CI
 can show a failing check on a PR before anyone merges it, including through
@@ -212,9 +212,11 @@ beads-tools check --base origin/main --head HEAD    # explicit range
 ```
 
 It reads the issues file at `--head`, prints each offending commit, each
-comment ID that file holds more than once and each [dependency
-cycle](#dependency-cycles) the range adds, and exits 1 when any commit fails
-the rules, any comment ID is duplicated or any cycle is added (2 on errors).
+duplicate comment ID that file holds and `--base` does not, and each
+[dependency cycle](#dependency-cycles) the range adds, and exits 1 when any
+commit fails the rules, any such duplicate is found or any cycle is added (2
+on errors). A duplicate `--base` already holds prints a warning and does not
+fail the check.
 `--require-trailers=BOOL` overrides `beadstools.requireTrailers` for one
 run. On a GitHub pull request
 the checked-out HEAD is a synthetic merge commit, which counts as a merge and
