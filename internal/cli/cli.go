@@ -52,6 +52,13 @@ usage:
         the issues file at head, and refuses a dependency cycle head adds
         that neither base nor the merge base holds; exits 1 when any fails.
         Needs only git, for CI.
+  beads-tools session SESSION-ID [--dir DIR] [--work-dir DIR] [--home DIR]
+                 [--actor-format FORMAT]
+        print the beads a sirene session touched: its id, title, status,
+        type, the date it was last modified and its parent epic. The link is
+        the actor br recorded on every mutation, which the beads-actor plugin
+        sets to a format holding the session id. Reads the beads stores the
+        session's beads-events.jsonl names, and the checkout's, read-only.
 
 --require-trailers overrides beadstools.requireTrailers for one run.
 
@@ -122,6 +129,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	case "land":
 		return runLand(ctx, repo, args[1:], stdout, stderr)
+	case "session":
+		return runSession(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK

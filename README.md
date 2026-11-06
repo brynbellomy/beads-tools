@@ -25,6 +25,7 @@ three gaps:
 | `beads-tools land pr N` | Closes the issues PR *N* closes, on its branch, then merges it. |
 | `beads-tools land sweep` | Closes issues whose closing commits are already on the main branch. |
 | `beads-tools check` | Applies `land pr`'s rules to a range of commits, for CI. |
+| `beads-tools session S` | Prints the issues a sirene session *S* touched. |
 
 ## Install
 
@@ -259,6 +260,39 @@ only the rows of the issues being closed are spliced back into the file. The
 tool then checks that nothing else changed, byte for byte, before it commits.
 
 Closes always happen in a throwaway worktree, never in your checkout.
+
+## Which issues a sirene session touched
+
+```sh
+beads-tools session 01a14743-2ec7-79eb-a9ab-39c56ca73589
+```
+
+It prints one row per issue: its ID, title, status, type, the date it was last
+modified, and the ID of its parent epic (`-` when it has none).
+
+The link is the actor `br` records on every mutation. Sirene's `beads-actor`
+plugin sets `BD_ACTOR` on every command an agent runs, to a format that holds
+the session ID (default `agent:{session}/{agent}`), so each row of a checkout's
+`events` table names the session that made it. The command reads the `events`
+table of each beads store the session touched, and reports the issues those
+rows name.
+
+The stores come from two places: the `beads-events.jsonl` file in the session
+directory, which sirene fills with a copy of the session's rows and which names
+every store the session touched, and the checkout of the working directory,
+which a live session may not have copied yet. A store is a `.beads` directory,
+after its `redirect` file as `br` uses it. Every store is opened read-only, and
+nothing is written.
+
+The session directory is found under `<work-dir>/.sirene/sessions/<id>`, then
+under `<home>/.sirene/sessions/<id>`. `--dir` names it outright; `--work-dir`
+and `--home` change the two searches (defaults: the working directory and
+`$HOME`). `--actor-format` gives the format the plugin is configured with; it
+must hold `{session}`, and the command refuses one that does not.
+
+An issue that several stores hold is reported once, from the store whose row is
+newest. A session whose agents ran with the plugin disabled has no rows, so the
+report is empty.
 
 ## Configuration
 

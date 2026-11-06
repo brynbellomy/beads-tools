@@ -1,0 +1,142 @@
+package cli_test
+
+import (
+	"bytes"
+	"database/sql"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/brynbellomy/beads-tools/internal/cli"
+)
+
+const sessionID = "01a14743-2ec7-79eb-a9ab-39c56ca73589"
+
+// sessionSchema is the part of br's schema the session report reads.
+const sessionSchema = `
+CREATE TABLE issues (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
+  issue_type TEXT NOT NULL DEFAULT 'task', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, event_type TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '', old_value TEXT, new_value TEXT, comment TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE dependencies (
+  issue_id TEXT NOT NULL, depends_on_id TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'blocks',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '',
+  metadata TEXT DEFAULT '{}', thread_id TEXT DEFAULT '', PRIMARY KEY (issue_id, depends_on_id));
+`
+
+// sessionRepo builds a checkout with a beads store and a session directory that
+// names it, and returns the checkout's directory.
+func sessionRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	store := filepath.Join(repo, ".beads")
+	require.NoError(t, os.MkdirAll(store, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+
+	db, err := sql.Open("sqlite", filepath.Join(store, "beads.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(sessionSchema)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO issues (id, title, status, issue_type, updated_at) VALUES
+		('t-epic', 'the epic', 'open', 'epic', '2026-10-01T00:00:00+00:00'),
+		('t-a', 'a child', 'in_progress', 'bug', '2026-10-19T01:10:24+00:00'),
+		('t-b', 'another session''s', 'open', 'task', '2026-10-19T01:10:24+00:00')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES ('t-a', 't-epic', 'parent-child')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO events (issue_id, event_type, actor) VALUES
+		('t-a', 'created', 'agent:` + sessionID + `/engineer-e96b44ea'),
+		('t-b', 'created', 'agent:019f0000-0000-7000-8000-000000000000/engineer')`)
+	require.NoError(t, err)
+
+	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "beads-events.jsonl"),
+		[]byte(`{"store":"`+store+`","issue_id":"t-a","event_type":"created","actor":"agent:`+sessionID+`/engineer-e96b44ea"}`+"\n"), 0o644))
+	return repo
+}
+
+func runSession(t *testing.T, dir string, args ...string) (int, string) {
+	t.Helper()
+	require.NotEmpty(t, args)
+	// --home names an empty directory so no test reads the operator's home.
+	argv := append([]string{"session", args[0], "--home", t.TempDir()}, args[1:]...)
+	cmd := exec.Command(binary, argv...)
+	cmd.Dir = dir
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), out.String()
+	}
+	require.NoError(t, err)
+	return 0, out.String()
+}
+
+func TestSession_PrintsTheBeadsTheSessionTouched(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSession(t, repo, sessionID)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "ID")
+	require.Contains(t, out, "PARENT")
+	require.Contains(t, out, "t-a")
+	require.Contains(t, out, "a child")
+	require.Contains(t, out, "in_progress")
+	require.Contains(t, out, "bug")
+	require.Contains(t, out, "2026-10-19T01:10:24+00:00")
+	require.Contains(t, out, "t-epic")
+	require.NotContains(t, out, "t-b", "another session's bead is not reported")
+}
+
+func TestSession_AnUnknownSessionIsAnError(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSession(t, repo, "019f0000-0000-7000-8000-000000000000")
+	require.Equal(t, cli.ExitError, code, out)
+	require.Contains(t, out, "no session")
+}
+
+func TestSession_AnExplicitDirNamesTheSession(t *testing.T) {
+	repo := sessionRepo(t)
+	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
+
+	code, out := runSession(t, t.TempDir(), sessionID, "--dir", dir, "--work-dir", repo)
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "t-a")
+}
+
+func TestSession_RefusesAFormatWithoutTheSession(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSession(t, repo, sessionID, "--actor-format", "agent:{agent}")
+	require.Equal(t, cli.ExitError, code, out)
+	require.Contains(t, out, "no {session}")
+}
+
+func TestSession_NeedsASessionID(t *testing.T) {
+	repo := sessionRepo(t)
+
+	cmd := exec.Command(binary, "session")
+	cmd.Dir = repo
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, cli.ExitError, exit.ExitCode())
+	require.Contains(t, out.String(), "usage:")
+}
