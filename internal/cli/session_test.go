@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -70,9 +71,16 @@ func sessionRepo(t *testing.T) string {
 
 func runSession(t *testing.T, dir string, args ...string) (int, string) {
 	t.Helper()
-	require.NotEmpty(t, args)
 	// --home names an empty directory so no test reads the operator's home.
-	argv := append([]string{"session", args[0], "--home", t.TempDir()}, args[1:]...)
+	argv := append([]string{"session"}, args...)
+	argv = append(argv, "--home", t.TempDir())
+	return runSessionArgv(t, dir, argv...)
+}
+
+// runSessionArgv runs the binary with argv as it is, so a test can place flags
+// and the session id in any order.
+func runSessionArgv(t *testing.T, dir string, argv ...string) (int, string) {
+	t.Helper()
 	cmd := exec.Command(binary, argv...)
 	cmd.Dir = dir
 	var out bytes.Buffer
@@ -130,13 +138,103 @@ func TestSession_RefusesAFormatWithoutTheSession(t *testing.T) {
 func TestSession_NeedsASessionID(t *testing.T) {
 	repo := sessionRepo(t)
 
-	cmd := exec.Command(binary, "session")
-	cmd.Dir = repo
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
-	var exit *exec.ExitError
-	require.ErrorAs(t, err, &exit)
-	require.Equal(t, cli.ExitError, exit.ExitCode())
-	require.Contains(t, out.String(), "usage:")
+	code, out := runSessionArgv(t, repo, "session")
+	require.Equal(t, cli.ExitError, code, out)
+	require.Contains(t, out, "usage:")
+}
+
+func TestSession_HelpPrintsUsageAndExitsZero(t *testing.T) {
+	repo := sessionRepo(t)
+
+	for _, flag := range []string{"--help", "-h", "-help"} {
+		t.Run(flag, func(t *testing.T) {
+			code, out := runSessionArgv(t, repo, "session", flag)
+			require.Equal(t, cli.ExitOK, code, out)
+			require.Contains(t, out, "beads-tools session SESSION-ID")
+			require.Contains(t, out, "--actor-format")
+			require.Contains(t, out, "--json")
+			require.NotContains(t, out, "no session", "help is not a session id")
+		})
+	}
+}
+
+func TestSession_HelpWinsOverASessionID(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSessionArgv(t, repo, "session", sessionID, "--help")
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "beads-tools session SESSION-ID")
+}
+
+func TestSession_JSONPrintsAnArrayOfBeads(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSession(t, repo, sessionID, "--json")
+	require.Equal(t, cli.ExitOK, code, out)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 1)
+	require.Equal(t, map[string]any{
+		"id":          "t-a",
+		"title":       "a child",
+		"status":      "in_progress",
+		"type":        "bug",
+		"updated_at":  "2026-10-19T01:10:24+00:00",
+		"parent_epic": "t-epic",
+	}, got[0])
+}
+
+func TestSession_JSONPrintsNullForNoParent(t *testing.T) {
+	repo := sessionRepo(t)
+	// A bead with no parent-child dependency.
+	db, err := sql.Open("sqlite", filepath.Join(repo, ".beads", "beads.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO issues (id, title, status, issue_type, updated_at)
+		VALUES ('t-c', 'no parent', 'open', 'task', '2026-10-20T00:00:00+00:00')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO events (issue_id, event_type, actor) VALUES ('t-c', 'created', 'agent:` + sessionID + `/engineer')`)
+	require.NoError(t, err)
+
+	code, out := runSession(t, repo, sessionID, "--json")
+	require.Equal(t, cli.ExitOK, code, out)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 2)
+	require.Equal(t, "t-c", got[1]["id"])
+	require.Contains(t, got[1], "parent_epic", "the key is present")
+	require.Nil(t, got[1]["parent_epic"], "and null")
+}
+
+func TestSession_JSONPrintsAnEmptyArrayForNoBeads(t *testing.T) {
+	// A session directory that names no store, in a checkout with no beads.
+	empty := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(empty, ".git"), 0o755))
+	dir := filepath.Join(empty, ".sirene", "sessions", sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	code, out := runSessionArgv(t, empty, "session", sessionID, "--dir", dir, "--json", "--home", t.TempDir())
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Equal(t, "[]\n", out, "an empty result is [], not null")
+}
+
+func TestSession_FlagsWorkBeforeAndAfterTheSessionID(t *testing.T) {
+	repo := sessionRepo(t)
+
+	before, outBefore := runSessionArgv(t, repo, "session", "--json", sessionID, "--home", t.TempDir())
+	after, outAfter := runSessionArgv(t, repo, "session", sessionID, "--json", "--home", t.TempDir())
+	require.Equal(t, cli.ExitOK, before, outBefore)
+	require.Equal(t, cli.ExitOK, after, outAfter)
+	require.Equal(t, outAfter, outBefore, "the flag's position does not change the report")
+	require.Contains(t, outBefore, `"t-a"`)
+}
+
+func TestSession_AFlagValueIsNotASessionID(t *testing.T) {
+	repo := sessionRepo(t)
+	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
+
+	// --dir's value must not be read as the session id.
+	code, out := runSessionArgv(t, repo, "session", "--dir", dir, sessionID, "--home", t.TempDir())
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, "t-a")
 }

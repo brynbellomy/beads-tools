@@ -265,10 +265,16 @@ Closes always happen in a throwaway worktree, never in your checkout.
 
 ```sh
 beads-tools session 01a14743-2ec7-79eb-a9ab-39c56ca73589
+beads-tools session 01a14743-2ec7-79eb-a9ab-39c56ca73589 --json
 ```
 
 It prints one row per issue: its ID, title, status, type, the date it was last
 modified, and the ID of its parent epic (`-` when it has none).
+
+`--json` prints a JSON array instead, one object per issue, with the fields
+`id`, `title`, `status`, `type`, `updated_at` (RFC 3339) and `parent_epic`
+(`null` when the issue has no parent epic). An empty result is `[]`, never
+`null`. Flags may come before or after the session ID.
 
 The link is the actor `br` records on every mutation. Sirene's `beads-actor`
 plugin sets `BD_ACTOR` on every command an agent runs, to a format that holds

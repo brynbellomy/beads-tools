@@ -3,6 +3,7 @@ package sessionbeads_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,6 +257,34 @@ func TestReport_PrintsATableWithADashForNoParent(t *testing.T) {
 	require.Contains(t, out, "t-a")
 	require.Contains(t, out, "t-epic")
 	require.Regexp(t, `t-b\s+no parent\s+closed\s+bug\s+2026-10-20T00:00:00\+00:00\s+-`, out)
+}
+
+func TestReportJSON_PrintsTheFieldsAndANullParent(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, sessionbeads.ReportJSON(&buf, []sessionbeads.Bead{
+		{ID: "t-a", Title: "a child", Status: "open", Type: "task", Updated: "2026-10-19T00:00:00+00:00", Parent: "t-epic"},
+		{ID: "t-b", Title: "no parent", Status: "closed", Type: "bug", Updated: "2026-10-20T00:00:00+00:00"},
+	}))
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Len(t, got, 2)
+	require.Equal(t, "t-epic", got[0]["parent_epic"])
+	require.Nil(t, got[1]["parent_epic"])
+	require.Equal(t, "2026-10-20T00:00:00+00:00", got[1]["updated_at"])
+}
+
+func TestReportJSON_AnEmptyListIsAnEmptyArray(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, sessionbeads.ReportJSON(&buf, nil))
+	require.Equal(t, "[]\n", buf.String())
+}
+
+func TestReportJSON_DoesNotEscapeHTML(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, sessionbeads.ReportJSON(&buf, []sessionbeads.Bead{
+		{ID: "t-a", Title: "a <b> & c", Status: "open", Type: "task", Updated: "2026-10-19T00:00:00+00:00"},
+	}))
+	require.Contains(t, buf.String(), "a <b> & c")
 }
 
 func TestReport_AnEmptyListPrintsOnlyTheHeader(t *testing.T) {

@@ -2,6 +2,7 @@ package sessionbeads
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"text/tabwriter"
 
@@ -25,6 +26,32 @@ func Report(w io.Writer, beads []Bead) error {
 		}
 	}
 	return errors.With(tw.Flush(), "writing the report").Err()
+}
+
+// ReportJSON prints beads as a JSON array, one object per bead. An empty list
+// prints [], never null.
+func ReportJSON(w io.Writer, beads []Bead) error {
+	type row struct {
+		ID         string  `json:"id"`
+		Title      string  `json:"title"`
+		Status     string  `json:"status"`
+		Type       string  `json:"type"`
+		Updated    string  `json:"updated_at"`
+		ParentEpic *string `json:"parent_epic"`
+	}
+	rows := make([]row, 0, len(beads))
+	for _, b := range beads {
+		r := row{ID: b.ID, Title: b.Title, Status: b.Status, Type: b.Type, Updated: b.Updated}
+		if b.Parent != "" {
+			parent := b.Parent
+			r.ParentEpic = &parent
+		}
+		rows = append(rows, r)
+	}
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return errors.With(enc.Encode(rows), "writing the report").Err()
 }
 
 // TouchedIn returns the beads the session touched: those of the stores its
