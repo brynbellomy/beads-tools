@@ -53,13 +53,14 @@ usage:
         that neither base nor the merge base holds; exits 1 when any fails.
         Needs only git, for CI.
   beads-tools session SESSION-ID [--dir DIR] [--work-dir DIR] [--home DIR]
-                 [--actor-format FORMAT] [--json]
+                 [--json]
         print the beads a sirene session touched: its id, title, status,
-        type, the date it was last modified and its parent epic. The link is
-        the actor br recorded on every mutation, which the beads-actor plugin
-        sets to a format holding the session id. Reads the beads stores the
-        session's beads-events.jsonl names, and the checkout's, read-only.
-        --json prints a JSON array instead of a table.
+        type, the date it was last modified and its parent epic. The session's
+        own beads-events.jsonl names them, so a bead stays reported after its
+        worktree is removed or br rebuilds its store. The stores the file
+        names are read live, read-only, for the type, the parent epic and a
+        fresher title and status. --json prints a JSON array instead of a
+        table.
 
 --require-trailers overrides beadstools.requireTrailers for one run.
 

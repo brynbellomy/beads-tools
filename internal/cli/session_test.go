@@ -127,12 +127,34 @@ func TestSession_AnExplicitDirNamesTheSession(t *testing.T) {
 	require.Contains(t, out, "t-a")
 }
 
-func TestSession_RefusesAFormatWithoutTheSession(t *testing.T) {
+func TestSession_ReportsABeadWhoseWorktreeWasRemoved(t *testing.T) {
+	repo := sessionRepo(t)
+	// A worktree that filed a bead and was then removed: the session's rows
+	// name it, and its store is gone.
+	gone := filepath.Join(t.TempDir(), "removed-worktree", ".beads")
+	appendCopiedRow(t, repo, gone, "t-gone", "filed in a worktree since removed", "open", "2026-10-19T01:10:24+00:00")
+	require.NoDirExists(t, gone)
+
+	code, out := runSession(t, repo, sessionID, "--json")
+	require.Equal(t, cli.ExitOK, code, out)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 2, "the removed worktree's bead is still the session's")
+	byID := map[string]map[string]any{}
+	for _, b := range got {
+		byID[b["id"].(string)] = b
+	}
+	require.Equal(t, "filed in a worktree since removed", byID["t-gone"]["title"])
+	require.Equal(t, "open", byID["t-gone"]["status"])
+	require.Equal(t, "", byID["t-gone"]["type"], "no store can supply a type")
+}
+
+func TestSession_HasNoActorFormatFlag(t *testing.T) {
 	repo := sessionRepo(t)
 
 	code, out := runSession(t, repo, sessionID, "--actor-format", "agent:{agent}")
 	require.Equal(t, cli.ExitError, code, out)
-	require.Contains(t, out, "no {session}")
+	require.Contains(t, out, "flag provided but not defined", "membership no longer depends on an actor format")
 }
 
 func TestSession_NeedsASessionID(t *testing.T) {
@@ -151,7 +173,6 @@ func TestSession_HelpPrintsUsageAndExitsZero(t *testing.T) {
 			code, out := runSessionArgv(t, repo, "session", flag)
 			require.Equal(t, cli.ExitOK, code, out)
 			require.Contains(t, out, "beads-tools session SESSION-ID")
-			require.Contains(t, out, "--actor-format")
 			require.Contains(t, out, "--json")
 			require.NotContains(t, out, "no session", "help is not a session id")
 		})
@@ -184,17 +205,29 @@ func TestSession_JSONPrintsAnArrayOfBeads(t *testing.T) {
 	}, got[0])
 }
 
+// appendCopiedRow appends one row to the repo's session beads-events.jsonl, as
+// sirene would when it copies the session's beads events.
+func appendCopiedRow(t *testing.T, repo, store, issueID, title, status, at string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(repo, ".sirene", "sessions", sessionID, "beads-events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"created",` +
+		`"actor":"agent:` + sessionID + `/engineer","title":"` + title + `","status":"` + status +
+		`","created_at":"` + at + `"}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
 func TestSession_JSONPrintsNullForNoParent(t *testing.T) {
 	repo := sessionRepo(t)
-	// A bead with no parent-child dependency.
+	// A bead with no parent-child dependency, named by a copied row.
 	db, err := sql.Open("sqlite", filepath.Join(repo, ".beads", "beads.db"))
 	require.NoError(t, err)
 	defer db.Close()
 	_, err = db.Exec(`INSERT INTO issues (id, title, status, issue_type, updated_at)
 		VALUES ('t-c', 'no parent', 'open', 'task', '2026-10-20T00:00:00+00:00')`)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO events (issue_id, event_type, actor) VALUES ('t-c', 'created', 'agent:` + sessionID + `/engineer')`)
-	require.NoError(t, err)
+	appendCopiedRow(t, repo, filepath.Join(repo, ".beads"), "t-c", "no parent", "open", "2026-10-20T00:00:00+00:00")
 
 	code, out := runSession(t, repo, sessionID, "--json")
 	require.Equal(t, cli.ExitOK, code, out)

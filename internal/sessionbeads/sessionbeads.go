@@ -1,10 +1,11 @@
 // Package sessionbeads answers which beads a sirene session touched.
 //
-// A sirene session's agents run br with BD_ACTOR set to a format that holds the
-// session id (the beads-actor plugin, default "agent:{session}/{agent}"), so
-// every mutation br records in a checkout's .beads/beads.db names the session.
-// The session directory also keeps beads-events.jsonl, sirene's copy of those
-// rows, which names every store the session touched.
+// The answer comes from the session's own beads-events.jsonl. Sirene copies
+// every beads event row its agents wrote into that file, so the file names the
+// beads of the session and outlives the removal of a worktree and a br rebuild
+// of a store's database. A live read of the stores the file names fills in the
+// fields the rows do not carry: the bead's type, its parent epic, and a
+// fresher title and status.
 package sessionbeads
 
 import (
@@ -24,15 +25,11 @@ import (
 	"github.com/brynbellomy/go-utils/errors"
 )
 
-// DefaultActorFormat is the BD_ACTOR format the beads-actor plugin ships with.
-const DefaultActorFormat = "agent:{session}/{agent}"
-
 const (
-	beadsDirName       = ".beads"
-	redirectName       = "redirect"
-	databaseName       = "beads.db"
-	beadsEventsFile    = "beads-events.jsonl"
-	sessionPlaceholder = "{session}"
+	beadsDirName    = ".beads"
+	redirectName    = "redirect"
+	databaseName    = "beads.db"
+	beadsEventsFile = "beads-events.jsonl"
 )
 
 // Bead is one bead a session touched, as the report prints it.
@@ -40,45 +37,54 @@ type Bead struct {
 	ID     string
 	Title  string
 	Status string
-	Type   string
-	// Updated is the store's own updated_at text, which br writes as RFC 3339
-	// in UTC.
+	// Type and Parent come from a store that still holds the bead, so they
+	// are empty when no store the session named still holds it.
+	Type string
+	// Updated is the time of the bead's newest word on it: the store's own
+	// updated_at when a store still holds it, else the newest copied row's
+	// created_at.
 	Updated string
 	// Parent is the bead's parent-child parent, empty when it has none.
 	Parent string
 }
 
-// touchedQuery selects the issues the session's actor touched, with the
-// parent-child parent of each. The actor match is a LIKE over the pattern the
-// format gives, so it uses the actor index.
-const touchedQuery = `
-SELECT i.id, i.title, i.status, i.issue_type, CAST(i.updated_at AS TEXT),
-       COALESCE((SELECT d.depends_on_id FROM dependencies d
-                 WHERE d.issue_id = i.id AND d.type = 'parent-child'
-                 ORDER BY d.depends_on_id LIMIT 1), '')
-FROM issues i
-WHERE i.id IN (SELECT e.issue_id FROM events e WHERE e.actor LIKE ? ESCAPE '\')
-ORDER BY i.id`
+// row is one line of a session's beads-events.jsonl: a beads event row that
+// sirene copied out of a store, with the issue's title and status as that
+// store held them at the time.
+type row struct {
+	Store     string `json:"store"`
+	IssueID   string `json:"issue_id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
 
-// Touched returns the beads the session touched in stores, sorted by id. A
-// store that holds no database contributes nothing. A bead that several stores
-// hold is reported once, from the store whose row is newest.
-func Touched(ctx context.Context, stores []string, sessionID, actorFormat string) ([]Bead, error) {
-	pattern, err := actorPattern(actorFormat, sessionID)
+// idChunk bounds the ids of one issues query, under SQLite's bound-variable
+// limit.
+const idChunk = 500
+
+// TouchedIn returns the beads the session touched, sorted by id: every issue
+// the copied rows of sessionDir name, with a live read of the stores those rows
+// name and of the checkout at workDir filling in what the rows do not carry. A
+// bead whose store was removed, or whose store's events table a br rebuild
+// wiped, is still reported, with what its rows say.
+func TouchedIn(ctx context.Context, sessionDir, workDir string) ([]Bead, error) {
+	rows, err := readRows(sessionDir)
 	if err != nil {
 		return nil, err
 	}
-	byID := map[string]Bead{}
-	for _, store := range stores {
-		beads, err := readStore(ctx, store, pattern)
-		if err != nil {
+	byID := fromRows(rows)
+	for _, store := range storesOf(rows) {
+		if err := enrich(ctx, store, byID); err != nil {
 			return nil, err
 		}
-		for _, b := range beads {
-			if held, ok := byID[b.ID]; ok && !newer(b.Updated, held.Updated) {
-				continue
-			}
-			byID[b.ID] = b
+	}
+	// The checkout may hold a bead the session's rows name whose own store has
+	// gone, and it holds the current state of a bead that landed. It names no
+	// bead the rows do not.
+	if store, ok := CheckoutStore(workDir); ok {
+		if err := enrich(ctx, store, byID); err != nil {
+			return nil, err
 		}
 	}
 	out := make([]Bead, 0, len(byID))
@@ -89,19 +95,148 @@ func Touched(ctx context.Context, stores []string, sessionID, actorFormat string
 	return out, nil
 }
 
-// newer reports whether a is later than b. Both are br's updated_at text, which
-// is RFC 3339; text that does not parse compares as text.
-func newer(a, b string) bool {
-	at, aerr := time.Parse(time.RFC3339Nano, a)
-	bt, berr := time.Parse(time.RFC3339Nano, b)
-	if aerr != nil || berr != nil {
-		return a > b
+// fromRows folds the copied rows into one bead per issue. Rows are appended in
+// event order, so a later row carries that store's later word: it wins, and an
+// older one never overwrites a newer.
+func fromRows(rows []row) map[string]Bead {
+	byID := make(map[string]Bead, len(rows))
+	for _, r := range rows {
+		if r.IssueID == "" {
+			continue
+		}
+		b := byID[r.IssueID]
+		if b.ID != "" && !newer(r.CreatedAt, b.Updated) {
+			continue
+		}
+		b.ID = r.IssueID
+		if r.Title != "" {
+			b.Title = r.Title
+		}
+		if r.Status != "" {
+			b.Status = r.Status
+		}
+		if r.CreatedAt != "" {
+			b.Updated = r.CreatedAt
+		}
+		byID[r.IssueID] = b
 	}
-	return at.After(bt)
+	return byID
 }
 
-// readStore returns the beads of store that pattern matches.
-func readStore(ctx context.Context, store, pattern string) ([]Bead, error) {
+// enrich folds the live issue rows of store into the beads it still holds. The
+// store's row is the current state of a bead, so its fields win, and a store
+// whose row is newer wins over one whose row is older.
+func enrich(ctx context.Context, store string, byID map[string]Bead) error {
+	wanted := make([]string, 0, len(byID))
+	for id := range byID {
+		wanted = append(wanted, id)
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	sort.Strings(wanted)
+	for start := 0; start < len(wanted); start += idChunk {
+		end := min(start+idChunk, len(wanted))
+		live, err := readStore(ctx, store, wanted[start:end])
+		if err != nil {
+			return err
+		}
+		for _, row := range live {
+			byID[row.ID] = mergeLive(byID[row.ID], row)
+		}
+	}
+	return nil
+}
+
+// mergeLive folds a live issue row into the bead the rows already named.
+func mergeLive(held, live Bead) Bead {
+	b := held
+	if live.Title != "" {
+		b.Title = live.Title
+	}
+	if live.Status != "" {
+		b.Status = live.Status
+	}
+	if live.Type != "" {
+		b.Type = live.Type
+	}
+	if live.Parent != "" {
+		b.Parent = live.Parent
+	}
+	// The bead's newest word on it. A live store's own updated_at is the
+	// current state, so it wins a tie against a copied row's time.
+	if b.Updated == "" || !newer(b.Updated, live.Updated) {
+		b.Updated = live.Updated
+	}
+	return b
+}
+
+// storesOf returns the distinct stores rows name, in the order they first
+// appear.
+func storesOf(rows []row) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, r := range rows {
+		if r.Store == "" {
+			continue
+		}
+		if _, dup := seen[r.Store]; dup {
+			continue
+		}
+		seen[r.Store] = struct{}{}
+		out = append(out, r.Store)
+	}
+	return out
+}
+
+// readRows returns the copied rows of a session directory. A directory with no
+// beads-events.jsonl holds none; a line that does not parse is skipped, so a
+// torn last line costs only itself.
+func readRows(sessionDir string) ([]row, error) {
+	f, err := os.Open(filepath.Join(sessionDir, beadsEventsFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
+	}
+	defer f.Close()
+	var out []row
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1<<16), 1<<24)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var r row
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		if r.Store == "" || r.IssueID == "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
+	}
+	return out, nil
+}
+
+// issuesQuery reads the issues of a store in ids, with the parent-child parent
+// of each. It is a template because the id list binds a variable count.
+const issuesQuery = `
+SELECT i.id, i.title, i.status, i.issue_type, CAST(i.updated_at AS TEXT),
+       COALESCE((SELECT d.depends_on_id FROM dependencies d
+                 WHERE d.issue_id = i.id AND d.type = 'parent-child'
+                 ORDER BY d.depends_on_id LIMIT 1), '')
+FROM issues i WHERE i.id IN (%s)`
+
+// readStore returns the issues of store whose ids are ids. A store that holds
+// no database contributes nothing, and one that holds none of the ids
+// contributes nothing.
+func readStore(ctx context.Context, store string, ids []string) ([]Bead, error) {
 	path := filepath.Join(store, databaseName)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -114,7 +249,13 @@ func readStore(ctx context.Context, store, pattern string) ([]Bead, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, touchedQuery, pattern)
+	args := make([]any, len(ids))
+	marks := make([]string, len(ids))
+	for i, id := range ids {
+		args[i] = id
+		marks[i] = "?"
+	}
+	rows, err := db.QueryContext(ctx, strings.Replace(issuesQuery, "%s", strings.Join(marks, ","), 1), args...)
 	if err != nil {
 		return nil, errors.With(err, "querying beads store").Set("store", store).Err()
 	}
@@ -123,14 +264,49 @@ func readStore(ctx context.Context, store, pattern string) ([]Bead, error) {
 	for rows.Next() {
 		var b Bead
 		if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &b.Updated, &b.Parent); err != nil {
-			return nil, errors.With(err, "reading a bead").Set("store", store).Err()
+			return nil, errors.With(err, "reading an issue").Set("store", store).Err()
 		}
 		out = append(out, b)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.With(err, "reading beads").Set("store", store).Err()
+		return nil, errors.With(err, "reading issues").Set("store", store).Err()
 	}
 	return out, nil
+}
+
+// timeLayouts are the shapes a beads timestamp arrives in: br writes RFC 3339,
+// and SQLite hands a DATETIME column back with a space and an offset.
+var timeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+}
+
+// newer reports whether a is later than b. A time beats no time; text that does
+// not parse as a time compares as text.
+func newer(a, b string) bool {
+	if a == "" {
+		return false
+	}
+	if b == "" {
+		return true
+	}
+	at, aok := parseTime(a)
+	bt, bok := parseTime(b)
+	if !aok || !bok {
+		return a > b
+	}
+	return at.After(bt)
+}
+
+func parseTime(s string) (time.Time, bool) {
+	for _, layout := range timeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // openReadOnly opens a beads database so that nothing can write it.
@@ -141,66 +317,6 @@ func openReadOnly(path string) (*sql.DB, error) {
 		return nil, errors.With(err, "opening beads store").Set("path", path).Err()
 	}
 	return db, nil
-}
-
-// actorPattern returns the LIKE pattern that matches the actors format gives
-// sessionID: the text before {session}, the id, the literal text after it up to
-// the next placeholder, and then anything.
-func actorPattern(format, sessionID string) (string, error) {
-	i := strings.Index(format, sessionPlaceholder)
-	if i < 0 {
-		return "", errors.WithNew("the actor format has no {session}").Set("format", format).Err()
-	}
-	prefix := format[:i]
-	rest := format[i+len(sessionPlaceholder):]
-	suffix := rest
-	if j := strings.Index(rest, "{"); j >= 0 {
-		suffix = rest[:j]
-	}
-	return likeEscape(prefix) + likeEscape(sessionID) + likeEscape(suffix) + "%", nil
-}
-
-// likeEscape escapes the characters that are special in a LIKE pattern.
-func likeEscape(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
-}
-
-// Stores returns the beads stores the session's copied rows name, in the order
-// they first appear. A session directory with no beads-events.jsonl names none.
-func Stores(sessionDir string) ([]string, error) {
-	f, err := os.Open(filepath.Join(sessionDir, beadsEventsFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
-	}
-	defer f.Close()
-	var out []string
-	seen := map[string]struct{}{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<16), 1<<24)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var row struct {
-			Store string `json:"store"`
-		}
-		if err := json.Unmarshal([]byte(line), &row); err != nil || row.Store == "" {
-			continue
-		}
-		if _, dup := seen[row.Store]; dup {
-			continue
-		}
-		seen[row.Store] = struct{}{}
-		out = append(out, row.Store)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
-	}
-	return out, nil
 }
 
 // Locate returns the directory of session id: dir when it is not empty, else

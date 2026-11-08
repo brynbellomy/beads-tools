@@ -1,7 +1,6 @@
 package sessionbeads
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"text/tabwriter"
@@ -52,18 +51,4 @@ func ReportJSON(w io.Writer, beads []Bead) error {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	return errors.With(enc.Encode(rows), "writing the report").Err()
-}
-
-// TouchedIn returns the beads the session touched: those of the stores its
-// copied rows name, and those of the checkout at workDir, which a live session
-// may not have copied yet.
-func TouchedIn(ctx context.Context, sessionDir, workDir, sessionID, actorFormat string) ([]Bead, error) {
-	stores, err := Stores(sessionDir)
-	if err != nil {
-		return nil, err
-	}
-	if store, ok := CheckoutStore(workDir); ok {
-		stores = append(stores, store)
-	}
-	return Touched(ctx, stores, sessionID, actorFormat)
 }

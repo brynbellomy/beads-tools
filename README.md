@@ -276,29 +276,30 @@ modified, and the ID of its parent epic (`-` when it has none).
 (`null` when the issue has no parent epic). An empty result is `[]`, never
 `null`. Flags may come before or after the session ID.
 
-The link is the actor `br` records on every mutation. Sirene's `beads-actor`
-plugin sets `BD_ACTOR` on every command an agent runs, to a format that holds
-the session ID (default `agent:{session}/{agent}`), so each row of a checkout's
-`events` table names the session that made it. The command reads the `events`
-table of each beads store the session touched, and reports the issues those
-rows name.
+The session's own `beads-events.jsonl` names the issues. Sirene copies every
+beads event row its agents wrote into that file, in the session directory, so
+the file records what the session touched. That copy is the membership rule: a
+bead stays in the session's report after the worktree that filed it is removed,
+and after `br` rebuilds a store's database from `issues.jsonl`, which restores
+every issue and no events at all.
 
-The stores come from two places: the `beads-events.jsonl` file in the session
-directory, which sirene fills with a copy of the session's rows and which names
-every store the session touched, and the checkout of the working directory,
-which a live session may not have copied yet. A store is a `.beads` directory,
-after its `redirect` file as `br` uses it. Every store is opened read-only, and
-nothing is written.
+The stores the file names are then read live, read-only, to fill in what the
+rows do not carry: the issue's type, its parent epic, and a fresher title and
+status. An issue whose store is gone, or which a rebuild left without the
+session's rows, is reported from its rows alone, so its type is empty and so is
+its parent. The checkout of the working directory is read the same way, which
+brings a bead that has landed up to its current state.
+
+A store is a `.beads` directory, after its `redirect` file as `br` uses it.
+Nothing is written to any of them.
 
 The session directory is found under `<work-dir>/.sirene/sessions/<id>`, then
 under `<home>/.sirene/sessions/<id>`. `--dir` names it outright; `--work-dir`
 and `--home` change the two searches (defaults: the working directory and
-`$HOME`). `--actor-format` gives the format the plugin is configured with; it
-must hold `{session}`, and the command refuses one that does not.
+`$HOME`).
 
-An issue that several stores hold is reported once, from the store whose row is
-newest. A session whose agents ran with the plugin disabled has no rows, so the
-report is empty.
+An issue that several stores hold is reported once, with the fields of the row
+modified last. A session with no copied rows reports nothing.
 
 ## Configuration
 

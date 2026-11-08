@@ -14,20 +14,16 @@ import (
 // sessionUsage is the help of the session subcommand.
 const sessionUsage = `usage:
   beads-tools session SESSION-ID [--dir DIR] [--work-dir DIR] [--home DIR]
-                    [--actor-format FORMAT] [--json]
+                    [--json]
 
 Print the beads a sirene session touched: each bead's id, title, status, type,
 the date it was last modified and its parent epic.
 
-The link is the actor br records on every mutation. Sirene's beads-actor plugin
-sets BD_ACTOR on every command an agent runs, to a format that holds the session
-id, so each row of a checkout's events table names the session that made it.
-The command reads the events table of each beads store the session touched, and
-reports the issues those rows name.
-
-The stores come from the session's beads-events.jsonl, which names every store
-the session touched, and from the checkout of the working directory. Each store
-is opened read-only.
+The session's own beads-events.jsonl names the beads. Sirene copies every beads
+event row its agents wrote into that file, so it outlives the removal of a
+worktree and a br rebuild of a store's database. The stores the file names are
+read live, read-only, to fill in the bead's type, its parent epic, and a fresher
+title and status; a bead whose store is gone is reported with what the rows say.
 
 flags:
   --dir DIR              the session's directory (default: found under
@@ -36,8 +32,6 @@ flags:
                          (default: the working directory)
   --home DIR             the sirene home whose session store holds the session
                          (default: $HOME)
-  --actor-format FORMAT  the BD_ACTOR format the beads-actor plugin sets; it
-                         must hold {session} (default: ` + sessionbeads.DefaultActorFormat + `)
   --json                 print a JSON array instead of a table
 `
 
@@ -48,7 +42,6 @@ func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	dir := fs.String("dir", "", "the session's directory (default: found under --work-dir, then --home)")
 	workDir := fs.String("work-dir", "", "the project whose session store holds the session (default: the working directory)")
 	home := fs.String("home", "", "the sirene home whose session store holds the session (default: $HOME)")
-	format := fs.String("actor-format", sessionbeads.DefaultActorFormat, "the BD_ACTOR format the beads-actor plugin sets; it must hold {session}")
 	asJSON := fs.Bool("json", false, "print a JSON array instead of a table")
 
 	flags, positional, help := splitArgs(fs, args)
@@ -85,7 +78,7 @@ func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		}
 		return ExitError
 	}
-	beads, err := sessionbeads.TouchedIn(ctx, sessionDir, *workDir, id, *format)
+	beads, err := sessionbeads.TouchedIn(ctx, sessionDir, *workDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "beads-tools: %v\n", err)
 		return ExitError

@@ -15,147 +15,10 @@ import (
 
 const session = "01a14743-2ec7-79eb-a9ab-39c56ca73589"
 
-func actor(agent string) string { return "agent:" + session + "/" + agent }
-
-func TestTouched_ReturnsOnlyTheSessionsBeads(t *testing.T) {
-	dir := t.TempDir()
-	f := newStore(t, dir)
-	f.issue("t-a", "the session's bead", "open", "task", "2026-10-19T01:10:24+00:00")
-	f.issue("t-b", "another session's bead", "open", "task", "2026-10-19T01:10:24+00:00")
-	f.issue("t-c", "untouched", "open", "task", "2026-10-19T01:10:24+00:00")
-	f.event("t-a", "created", actor("engineer-e96b44ea"))
-	f.event("t-b", "created", "agent:019f0000-0000-7000-8000-000000000000/engineer")
-	f.event("t-c", "created", "brynbellomy")
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{f.store}, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 1)
-	require.Equal(t, "t-a", beads[0].ID)
-	require.Equal(t, "the session's bead", beads[0].Title)
-}
-
-func TestTouched_ReportsEveryFieldAndTheParentEpic(t *testing.T) {
-	dir := t.TempDir()
-	f := newStore(t, dir)
-	f.issue("t-epic", "the epic", "open", "epic", "2026-10-01T00:00:00+00:00")
-	f.issue("t-a", "a child", "in_progress", "bug", "2026-10-19T01:10:24.437623+00:00")
-	f.parent("t-a", "t-epic")
-	f.event("t-a", "status_changed", actor("engineer"))
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{f.store}, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 1)
-	require.Equal(t, sessionbeads.Bead{
-		ID:      "t-a",
-		Title:   "a child",
-		Status:  "in_progress",
-		Type:    "bug",
-		Updated: "2026-10-19T01:10:24.437623+00:00",
-		Parent:  "t-epic",
-	}, beads[0])
-}
-
-func TestTouched_ABeadWithoutAParentHasNone(t *testing.T) {
-	dir := t.TempDir()
-	f := newStore(t, dir)
-	f.issue("t-a", "no parent", "open", "task", "2026-10-19T01:10:24+00:00")
-	f.event("t-a", "created", actor("engineer"))
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{f.store}, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 1)
-	require.Empty(t, beads[0].Parent)
-}
-
-func TestTouched_MergesStoresAndKeepsTheNewestRow(t *testing.T) {
-	root := t.TempDir()
-	old := newStore(t, filepath.Join(root, "old"))
-	old.issue("t-a", "stale title", "open", "task", "2026-10-01T00:00:00+00:00")
-	old.event("t-a", "created", actor("engineer"))
-	fresh := newStore(t, filepath.Join(root, "fresh"))
-	fresh.issue("t-a", "current title", "closed", "task", "2026-10-19T00:00:00+00:00")
-	fresh.event("t-a", "closed", actor("engineer"))
-	fresh.issue("t-b", "only here", "open", "task", "2026-10-19T00:00:00+00:00")
-	fresh.event("t-b", "created", actor("engineer"))
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{old.store, fresh.store}, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 2)
-	require.Equal(t, "t-a", beads[0].ID)
-	require.Equal(t, "current title", beads[0].Title, "the newest row wins")
-	require.Equal(t, "closed", beads[0].Status)
-	require.Equal(t, "t-b", beads[1].ID)
-}
-
-func TestTouched_ComparesTimestampsAsTimesNotText(t *testing.T) {
-	root := t.TempDir()
-	// The same instant, written with and without a fraction: as text the
-	// shorter one sorts first, so a text comparison would pick the wrong row.
-	short := newStore(t, filepath.Join(root, "short"))
-	short.issue("t-a", "the later row", "closed", "task", "2026-10-19T00:00:00+00:00")
-	short.event("t-a", "closed", actor("engineer"))
-	long := newStore(t, filepath.Join(root, "long"))
-	long.issue("t-a", "the earlier row", "open", "task", "2026-10-19T00:00:00.000001+00:00")
-	long.event("t-a", "created", actor("engineer"))
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{long.store, short.store}, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 1)
-	require.Equal(t, "the earlier row", beads[0].Title, "the microsecond-later row wins")
-}
-
-func TestTouched_IgnoresAStoreWithNoDatabase(t *testing.T) {
-	dir := t.TempDir()
-	empty := filepath.Join(dir, "empty", ".beads")
-	require.NoError(t, os.MkdirAll(empty, 0o755))
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{empty}, session, sessionbeads.DefaultActorFormat)
+func TestStores_ASessionWithNoCopiedRowsNamesNone(t *testing.T) {
+	beads, err := sessionbeads.TouchedIn(context.Background(), t.TempDir(), t.TempDir())
 	require.NoError(t, err)
 	require.Empty(t, beads)
-}
-
-func TestTouched_RefusesAFormatWithoutTheSession(t *testing.T) {
-	_, err := sessionbeads.Touched(context.Background(), nil, session, "agent:{agent}")
-	require.ErrorContains(t, err, "no {session}")
-}
-
-func TestTouched_MatchesAConfiguredFormat(t *testing.T) {
-	dir := t.TempDir()
-	f := newStore(t, dir)
-	f.issue("t-a", "a bead", "open", "task", "2026-10-19T00:00:00+00:00")
-	f.event("t-a", "created", session+"@engineer {team}")
-	f.event("t-a", "created", "agent:"+session+"/engineer")
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{f.store}, session, "{session}@{agent} {team}")
-	require.NoError(t, err)
-	require.Len(t, beads, 1, "the format's own shape matches, and the default one does not")
-}
-
-func TestTouched_EscapesLikeWildcardsInTheSessionID(t *testing.T) {
-	dir := t.TempDir()
-	f := newStore(t, dir)
-	f.issue("t-a", "a bead", "open", "task", "2026-10-19T00:00:00+00:00")
-	f.event("t-a", "created", "agent:sess_1/engineer")
-	f.event("t-a", "created", "agent:sessX1/engineer")
-
-	beads, err := sessionbeads.Touched(context.Background(), []string{f.store}, "sess_1", sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 1, "the underscore is a literal, not a LIKE wildcard")
-}
-
-func TestStores_ReturnsTheStoresTheSessionNamed(t *testing.T) {
-	root := t.TempDir()
-	dir := sessionDir(t, root, session, "/w/one/.beads", "/w/two/.beads", "/w/one/.beads")
-
-	stores, err := sessionbeads.Stores(dir)
-	require.NoError(t, err)
-	require.Equal(t, []string{"/w/one/.beads", "/w/two/.beads"}, stores)
-}
-
-func TestStores_ASessionWithNoCopiedRowsNamesNone(t *testing.T) {
-	stores, err := sessionbeads.Stores(t.TempDir())
-	require.NoError(t, err)
-	require.Empty(t, stores)
 }
 
 func TestLocate_FindsTheSessionInTheProjectThenTheHome(t *testing.T) {
@@ -221,28 +84,6 @@ func TestCheckoutStore_ACheckoutWithNoBeadsHasNone(t *testing.T) {
 
 	_, ok := sessionbeads.CheckoutStore(repo)
 	require.False(t, ok)
-}
-
-func TestTouchedIn_ReadsTheSessionsStoresAndTheCheckouts(t *testing.T) {
-	root := t.TempDir()
-	workDir := filepath.Join(root, "project")
-	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".git"), 0o755))
-	worktree := filepath.Join(root, "worktree")
-	require.NoError(t, os.MkdirAll(worktree, 0o755))
-
-	worktreeStore := newStore(t, worktree)
-	worktreeStore.issue("t-a", "from the worktree", "open", "task", "2026-10-19T00:00:00+00:00")
-	worktreeStore.event("t-a", "created", actor("engineer"))
-	checkoutStore := newStore(t, workDir)
-	checkoutStore.issue("t-b", "from the checkout", "open", "task", "2026-10-19T00:00:00+00:00")
-	checkoutStore.event("t-b", "created", actor("engineer"))
-
-	dir := sessionDir(t, workDir, session, worktreeStore.store)
-	beads, err := sessionbeads.TouchedIn(context.Background(), dir, workDir, session, sessionbeads.DefaultActorFormat)
-	require.NoError(t, err)
-	require.Len(t, beads, 2)
-	require.Equal(t, "t-a", beads[0].ID)
-	require.Equal(t, "t-b", beads[1].ID)
 }
 
 func TestReport_PrintsATableWithADashForNoParent(t *testing.T) {
