@@ -12,8 +12,6 @@ import (
 	"github.com/brynbellomy/beads-tools/internal/sessionbeads"
 )
 
-// eventsWriter writes a session's beads-events.jsonl by hand, so a test states
-// exactly which rows sirene copied.
 type eventsWriter struct {
 	t    *testing.T
 	dir  string
@@ -32,13 +30,27 @@ func newSession(t *testing.T) *eventsWriter {
 
 // copied appends one copied row. A row is what sirene recorded: the store, the
 // issue, the event, the actor that made it, and the issue's title and status as
-// that store held them at the time.
+// that store held them at the time. Such a row carries no issue type and no
+// updated time, as a row sirene wrote before it copied them does.
 func (w *eventsWriter) copied(store, issueID, eventType, agent, title, status, at string) {
 	w.t.Helper()
-	line := `{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"` + eventType +
+	w.write(`{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"` + eventType +
 		`","actor":"agent:` + session + `/` + agent + `","title":"` + title + `","status":"` + status +
-		`","created_at":"` + at + `"}` + "\n"
-	_, err := w.file.WriteString(line)
+		`","created_at":"` + at + `"}`)
+}
+
+// copiedTyped appends one copied row that carries the issue's type and the time
+// it last changed, as the sweep records them from the store.
+func (w *eventsWriter) copiedTyped(store, issueID, eventType, agent, title, status, issueType, at, updated string) {
+	w.t.Helper()
+	w.write(`{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"` + eventType +
+		`","actor":"agent:` + session + `/` + agent + `","title":"` + title + `","status":"` + status +
+		`","issue_type":"` + issueType + `","updated_at":"` + updated + `","created_at":"` + at + `"}`)
+}
+
+func (w *eventsWriter) write(line string) {
+	w.t.Helper()
+	_, err := w.file.WriteString(line + "\n")
 	require.NoError(w.t, err)
 }
 
@@ -85,8 +97,8 @@ func TestTouched_ReportsABeadWhoseEventsTableABRRebuildWiped(t *testing.T) {
 }
 
 // TestTouched_TrustsTheRowsWhenTheStoreIsGone pins that a bead with no live
-// store is reported from its rows alone, with empty fields the rows cannot
-// carry rather than a guess.
+// store is reported from its rows alone, with empty fields the rows do not carry
+// rather than a guess.
 func TestTouched_TrustsTheRowsWhenTheStoreIsGone(t *testing.T) {
 	w := newSession(t)
 	gone := filepath.Join(t.TempDir(), "removed", ".beads")
@@ -97,8 +109,53 @@ func TestTouched_TrustsTheRowsWhenTheStoreIsGone(t *testing.T) {
 	require.Len(t, beads, 1)
 	require.Equal(t, "from the row", beads[0].Title)
 	require.Equal(t, "open", beads[0].Status)
-	require.Empty(t, beads[0].Type, "no store can supply a type")
+	require.Empty(t, beads[0].Type, "a row written before the copy carried a type has none")
 	require.Empty(t, beads[0].Parent, "no store can supply a parent")
+}
+
+// TestTouched_AStoreGoneKeepsTheCopysTypeAndUpdated is the pin for this change:
+// a bead whose store was removed still reports the issue type and the time it
+// last changed, because the session's own copy of its rows carries both.
+func TestTouched_AStoreGoneKeepsTheCopysTypeAndUpdated(t *testing.T) {
+	w := newSession(t)
+	gone := filepath.Join(t.TempDir(), "removed-worktree", ".beads")
+	w.copiedTyped(gone, "t-gone", "status_changed", "engineer", "filed in a worktree since removed", "closed",
+		"bug", "2026-10-19T01:10:24+00:00", "2026-10-19T03:40:00+00:00")
+
+	beads, err := w.touched(t.TempDir())
+	require.NoError(t, err)
+	require.Len(t, beads, 1)
+	require.Equal(t, "bug", beads[0].Type, "the copy's type stands when the store is gone")
+	require.Equal(t, "2026-10-19T03:40:00+00:00", beads[0].Updated, "and the time it last changed")
+}
+
+// TestTouched_TheCopyAgainstABeadTheCheckoutAlsoHolds pins that a store which
+// still holds the bead wins over the copy for the type and the updated time.
+func TestTouched_TheCopyAgainstABeadTheCheckoutAlsoHolds(t *testing.T) {
+	w := newSession(t)
+	f := newStore(t, t.TempDir())
+	f.issue("t-a", "a child", "closed", "epic", "2026-10-20T00:00:00+00:00")
+	w.copiedTyped(f.store, "t-a", "created", "engineer", "a child", "open", "bug",
+		"2026-10-19T01:00:00+00:00", "2026-10-19T01:00:00+00:00")
+
+	beads, err := w.touched(t.TempDir())
+	require.NoError(t, err)
+	require.Len(t, beads, 1)
+	require.Equal(t, "epic", beads[0].Type, "the live store's type wins")
+	require.Equal(t, "2026-10-20T00:00:00+00:00", beads[0].Updated, "and its updated time")
+}
+
+// TestTouched_ARowWithoutAnUpdatedTimeFallsBackToTheEventTime pins that a row
+// carrying only its event time still gives the bead one.
+func TestTouched_ARowWithoutAnUpdatedTimeFallsBackToTheEventTime(t *testing.T) {
+	w := newSession(t)
+	gone := filepath.Join(t.TempDir(), "removed", ".beads")
+	w.copied(gone, "t-a", "created", "engineer", "from the row", "open", "2026-10-19T01:10:24+00:00")
+
+	beads, err := w.touched(t.TempDir())
+	require.NoError(t, err)
+	require.Len(t, beads, 1)
+	require.Equal(t, "2026-10-19T01:10:24+00:00", beads[0].Updated)
 }
 
 // TestTouched_MatchesABeadByRowNotByActor pins that membership is the session's

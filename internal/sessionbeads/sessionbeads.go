@@ -3,9 +3,10 @@
 // The answer comes from the session's own beads-events.jsonl. Sirene copies
 // every beads event row its agents wrote into that file, so the file names the
 // beads of the session and outlives the removal of a worktree and a br rebuild
-// of a store's database. A live read of the stores the file names fills in the
-// fields the rows do not carry: the bead's type, its parent epic, and a
-// fresher title and status.
+// of a store's database. Each row carries the issue's title, status, type and
+// updated time as its store held them. A live read of the stores the file names
+// fills in what the rows do not carry: a fresher title, status, type and
+// updated time, and the parent epic.
 package sessionbeads
 
 import (
@@ -37,26 +38,40 @@ type Bead struct {
 	ID     string
 	Title  string
 	Status string
-	// Type and Parent come from a store that still holds the bead, so they
-	// are empty when no store the session named still holds it.
+	// Type is the issue's type ("task", "bug", "epic", …). A live store that
+	// still holds the bead supplies it; otherwise the session's copied rows
+	// do, so it is empty only when neither carries one.
 	Type string
 	// Updated is the time of the bead's newest word on it: the store's own
 	// updated_at when a store still holds it, else the newest copied row's
-	// created_at.
+	// updated_at, else the newest copied row's created_at.
 	Updated string
-	// Parent is the bead's parent-child parent, empty when it has none.
+	// Parent is the bead's parent-child parent, empty when it has none. Only
+	// a live store supplies it.
 	Parent string
 }
 
 // row is one line of a session's beads-events.jsonl: a beads event row that
-// sirene copied out of a store, with the issue's title and status as that
-// store held them at the time.
+// sirene copied out of a store, with the issue's title, status, type and
+// updated time as that store held them at the time. The last two are empty on
+// a row sirene wrote before it copied them.
 type row struct {
 	Store     string `json:"store"`
 	IssueID   string `json:"issue_id"`
 	Title     string `json:"title"`
 	Status    string `json:"status"`
+	IssueType string `json:"issue_type"`
+	UpdatedAt string `json:"updated_at"`
 	CreatedAt string `json:"created_at"`
+}
+
+// lastChange is the latest moment the row knows of for the issue: the store's
+// updated_at when the row carries one, else the event's own time.
+func (r row) lastChange() string {
+	if r.UpdatedAt != "" {
+		return r.UpdatedAt
+	}
+	return r.CreatedAt
 }
 
 // idChunk bounds the ids of one issues query, under SQLite's bound-variable
@@ -97,26 +112,33 @@ func TouchedIn(ctx context.Context, sessionDir, workDir string) ([]Bead, error) 
 
 // fromRows folds the copied rows into one bead per issue. Rows are appended in
 // event order, so a later row carries that store's later word: it wins, and an
-// older one never overwrites a newer.
+// older one never overwrites a newer. Rows are ordered by the event time; the
+// winning row also gives the issue's type and its updated time, which is the
+// store's own updated_at when the row carries one and the event time otherwise.
 func fromRows(rows []row) map[string]Bead {
 	byID := make(map[string]Bead, len(rows))
+	eventAt := make(map[string]string, len(rows))
 	for _, r := range rows {
 		if r.IssueID == "" {
 			continue
 		}
 		b := byID[r.IssueID]
-		if b.ID != "" && !newer(r.CreatedAt, b.Updated) {
+		if b.ID != "" && !newer(r.CreatedAt, eventAt[r.IssueID]) {
 			continue
 		}
 		b.ID = r.IssueID
+		eventAt[r.IssueID] = r.CreatedAt
 		if r.Title != "" {
 			b.Title = r.Title
 		}
 		if r.Status != "" {
 			b.Status = r.Status
 		}
-		if r.CreatedAt != "" {
-			b.Updated = r.CreatedAt
+		if r.IssueType != "" {
+			b.Type = r.IssueType
+		}
+		if at := r.lastChange(); at != "" {
+			b.Updated = at
 		}
 		byID[r.IssueID] = b
 	}

@@ -251,6 +251,30 @@ func TestSession_JSONPrintsAnEmptyArrayForNoBeads(t *testing.T) {
 	require.Equal(t, "[]\n", out, "an empty result is [], not null")
 }
 
+// TestSession_ShowsTheTypeAndTheUpdatedTimeOfABeadWhoseStoreIsGone pins the
+// copy as the fallback: the row carries the type and the last-updated time, so
+// a bead filed in a worktree that was since removed still shows both.
+func TestSession_ShowsTheTypeAndTheUpdatedTimeOfABeadWhoseStoreIsGone(t *testing.T) {
+	root := t.TempDir()
+	gone := filepath.Join(root, "removed-worktree", ".beads")
+	dir := filepath.Join(root, ".sirene", "sessions", sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	rowJSON := `{"store":"` + gone + `","issue_id":"t-gone","event_type":"status_changed",` +
+		`"actor":"agent:` + sessionID + `/engineer","title":"filed in a worktree since removed",` +
+		`"status":"closed","issue_type":"bug","updated_at":"2026-10-19T03:40:00+00:00",` +
+		`"created_at":"2026-10-18T09:00:00+00:00"}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "beads-events.jsonl"), []byte(rowJSON), 0o644))
+
+	code, out := runSessionArgv(t, t.TempDir(), "session", sessionID, "--dir", dir, "--json", "--home", t.TempDir())
+	require.Equal(t, cli.ExitOK, code, out)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 1)
+	require.Equal(t, "bug", got[0]["type"], "the copy's type stands when the store is gone")
+	require.Equal(t, "2026-10-19T03:40:00+00:00", got[0]["updated_at"], "and the time it last changed")
+	require.Nil(t, got[0]["parent_epic"], "no row carries a parent epic")
+}
+
 func TestSession_FlagsWorkBeforeAndAfterTheSessionID(t *testing.T) {
 	repo := sessionRepo(t)
 

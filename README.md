@@ -284,11 +284,14 @@ and after `br` rebuilds a store's database from `issues.jsonl`, which restores
 every issue and no events at all.
 
 The stores the file names are then read live, read-only, to fill in what the
-rows do not carry: the issue's type, its parent epic, and a fresher title and
-status. An issue whose store is gone, or which a rebuild left without the
-session's rows, is reported from its rows alone, so its type is empty and so is
-its parent. The checkout of the working directory is read the same way, which
-brings a bead that has landed up to its current state.
+rows do not carry, or to bring a bead up to its current state: its title,
+status, type, last-updated time, and parent epic. Each row already carries the
+title, status, type and last-updated time the store held when sirene copied it,
+so an issue whose store is gone, or which a rebuild left without the session's
+rows, is reported from its rows alone. Its parent epic is the one field no row
+carries, so that alone is empty in this case. The checkout of the working
+directory is read the same way, which brings a bead that has landed up to its
+current state.
 
 A store is a `.beads` directory, after its `redirect` file as `br` uses it.
 Nothing is written to any of them.
