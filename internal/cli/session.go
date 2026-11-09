@@ -22,10 +22,9 @@ the date it was last modified and its parent epic.
 The session's own beads-events.jsonl names the beads. Sirene copies every beads
 event row its agents wrote into that file, so it outlives the removal of a
 worktree and a br rebuild of a store's database. Each row carries the issue's
-title, status, type and last-updated time as its store held them. The stores
-the file names are read live, read-only, to fill in a fresher title, status,
-type and updated time, and the parent epic; a bead whose store is gone is
-reported with what the rows say.
+title, status, type, last-updated time and parent epic as its store held them.
+The stores the file names are read live, read-only, to bring a bead up to its
+current state; a bead whose store is gone is reported with what the rows say.
 
 flags:
   --dir DIR              the session's directory (default: found under

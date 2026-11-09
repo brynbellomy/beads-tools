@@ -3,10 +3,10 @@
 // The answer comes from the session's own beads-events.jsonl. Sirene copies
 // every beads event row its agents wrote into that file, so the file names the
 // beads of the session and outlives the removal of a worktree and a br rebuild
-// of a store's database. Each row carries the issue's title, status, type and
-// updated time as its store held them. A live read of the stores the file names
-// fills in what the rows do not carry: a fresher title, status, type and
-// updated time, and the parent epic.
+// of a store's database. Each row carries the issue's title, status, type,
+// updated time and parent epic as its store held them. A live read of the stores
+// the file names fills in what the rows do not carry, or brings a bead up to its
+// current state.
 package sessionbeads
 
 import (
@@ -46,15 +46,16 @@ type Bead struct {
 	// updated_at when a store still holds it, else the newest copied row's
 	// updated_at, else the newest copied row's created_at.
 	Updated string
-	// Parent is the bead's parent-child parent, empty when it has none. Only
-	// a live store supplies it.
+	// Parent is the bead's parent-child parent, empty when it has none. A live
+	// store that still holds the bead supplies it; otherwise the session's
+	// copied rows do.
 	Parent string
 }
 
 // row is one line of a session's beads-events.jsonl: a beads event row that
-// sirene copied out of a store, with the issue's title, status, type and
-// updated time as that store held them at the time. The last two are empty on
-// a row sirene wrote before it copied them.
+// sirene copied out of a store, with the issue's title, status, type, updated
+// time and parent-child parent as that store held them at the time. A field is
+// empty on a row sirene wrote before it copied that field.
 type row struct {
 	Store     string `json:"store"`
 	IssueID   string `json:"issue_id"`
@@ -62,6 +63,7 @@ type row struct {
 	Status    string `json:"status"`
 	IssueType string `json:"issue_type"`
 	UpdatedAt string `json:"updated_at"`
+	Parent    string `json:"parent"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -136,6 +138,9 @@ func fromRows(rows []row) map[string]Bead {
 		}
 		if r.IssueType != "" {
 			b.Type = r.IssueType
+		}
+		if r.Parent != "" {
+			b.Parent = r.Parent
 		}
 		if at := r.lastChange(); at != "" {
 			b.Updated = at

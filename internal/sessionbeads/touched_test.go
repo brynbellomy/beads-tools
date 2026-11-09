@@ -39,13 +39,14 @@ func (w *eventsWriter) copied(store, issueID, eventType, agent, title, status, a
 		`","created_at":"` + at + `"}`)
 }
 
-// copiedTyped appends one copied row that carries the issue's type and the time
-// it last changed, as the sweep records them from the store.
-func (w *eventsWriter) copiedTyped(store, issueID, eventType, agent, title, status, issueType, at, updated string) {
+// copiedTyped appends one copied row that carries the issue's type, the time it
+// last changed and its parent epic, as the sweep records them from the store.
+func (w *eventsWriter) copiedTyped(store, issueID, eventType, agent, title, status, issueType, parent, at, updated string) {
 	w.t.Helper()
 	w.write(`{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"` + eventType +
 		`","actor":"agent:` + session + `/` + agent + `","title":"` + title + `","status":"` + status +
-		`","issue_type":"` + issueType + `","updated_at":"` + updated + `","created_at":"` + at + `"}`)
+		`","issue_type":"` + issueType + `","updated_at":"` + updated + `","parent":"` + parent +
+		`","created_at":"` + at + `"}`)
 }
 
 func (w *eventsWriter) write(line string) {
@@ -110,23 +111,25 @@ func TestTouched_TrustsTheRowsWhenTheStoreIsGone(t *testing.T) {
 	require.Equal(t, "from the row", beads[0].Title)
 	require.Equal(t, "open", beads[0].Status)
 	require.Empty(t, beads[0].Type, "a row written before the copy carried a type has none")
-	require.Empty(t, beads[0].Parent, "no store can supply a parent")
+	require.Empty(t, beads[0].Parent, "a row written before the copy carried a parent has none")
 }
 
-// TestTouched_AStoreGoneKeepsTheCopysTypeAndUpdated is the pin for this change:
-// a bead whose store was removed still reports the issue type and the time it
-// last changed, because the session's own copy of its rows carries both.
-func TestTouched_AStoreGoneKeepsTheCopysTypeAndUpdated(t *testing.T) {
+// TestTouched_AStoreGoneKeepsTheCopysTypeUpdatedAndParent is the pin for this
+// change: a bead whose store was removed still reports its issue type, the time
+// it last changed and its parent epic, because the session's own copy of its
+// rows carries all three.
+func TestTouched_AStoreGoneKeepsTheCopysTypeUpdatedAndParent(t *testing.T) {
 	w := newSession(t)
 	gone := filepath.Join(t.TempDir(), "removed-worktree", ".beads")
 	w.copiedTyped(gone, "t-gone", "status_changed", "engineer", "filed in a worktree since removed", "closed",
-		"bug", "2026-10-19T01:10:24+00:00", "2026-10-19T03:40:00+00:00")
+		"bug", "t-epic", "2026-10-19T01:10:24+00:00", "2026-10-19T03:40:00+00:00")
 
 	beads, err := w.touched(t.TempDir())
 	require.NoError(t, err)
 	require.Len(t, beads, 1)
 	require.Equal(t, "bug", beads[0].Type, "the copy's type stands when the store is gone")
 	require.Equal(t, "2026-10-19T03:40:00+00:00", beads[0].Updated, "and the time it last changed")
+	require.Equal(t, "t-epic", beads[0].Parent, "and its parent epic")
 }
 
 // TestTouched_TheCopyAgainstABeadTheCheckoutAlsoHolds pins that a store which
@@ -135,7 +138,8 @@ func TestTouched_TheCopyAgainstABeadTheCheckoutAlsoHolds(t *testing.T) {
 	w := newSession(t)
 	f := newStore(t, t.TempDir())
 	f.issue("t-a", "a child", "closed", "epic", "2026-10-20T00:00:00+00:00")
-	w.copiedTyped(f.store, "t-a", "created", "engineer", "a child", "open", "bug",
+	f.parent("t-a", "t-live-epic")
+	w.copiedTyped(f.store, "t-a", "created", "engineer", "a child", "open", "bug", "t-copy-epic",
 		"2026-10-19T01:00:00+00:00", "2026-10-19T01:00:00+00:00")
 
 	beads, err := w.touched(t.TempDir())
@@ -143,6 +147,7 @@ func TestTouched_TheCopyAgainstABeadTheCheckoutAlsoHolds(t *testing.T) {
 	require.Len(t, beads, 1)
 	require.Equal(t, "epic", beads[0].Type, "the live store's type wins")
 	require.Equal(t, "2026-10-20T00:00:00+00:00", beads[0].Updated, "and its updated time")
+	require.Equal(t, "t-live-epic", beads[0].Parent, "and its parent epic")
 }
 
 // TestTouched_ARowWithoutAnUpdatedTimeFallsBackToTheEventTime pins that a row
