@@ -1,107 +1,80 @@
-// Package sessionbeads answers which beads a sirene session touched.
+// Package sessionbeads answers which beads a session or a user touched.
 //
-// The answer comes from the session's own beads-events.jsonl. Sirene copies
-// every beads event row its agents wrote into that file, so the file names the
-// beads of the session and outlives the removal of a worktree and a br rebuild
-// of a store's database. Each row carries the issue's title, status, type,
-// updated time and parent epic as its store held them. A live read of the stores
-// the file names fills in what the rows do not carry, or brings a bead up to its
-// current state.
+// The answer comes from the labels br writes on a bead: session:<id> and
+// user:<escaped email>. Membership therefore lives in git, versioned with the
+// branch, and is read from issues.jsonl files alone: the main checkout's and
+// each live worktree's. Nothing here opens a beads database or reads an events
+// table.
 package sessionbeads
 
 import (
-	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/brynbellomy/go-utils/errors"
+
+	"github.com/brynbellomy/beads-tools/internal/beadsfile"
+	"github.com/brynbellomy/beads-tools/internal/gitx"
+	"github.com/brynbellomy/beads-tools/internal/labels"
 )
 
 const (
-	beadsDirName    = ".beads"
-	redirectName    = "redirect"
-	databaseName    = "beads.db"
-	beadsEventsFile = "beads-events.jsonl"
+	beadsDirName = ".beads"
+	redirectName = "redirect"
+	issuesName   = "issues.jsonl"
 )
 
-// Bead is one bead a session touched, as the report prints it.
+// Bead is one bead a session or a user touched, as the report prints it.
 type Bead struct {
 	ID     string
 	Title  string
 	Status string
-	// Type is the issue's type ("task", "bug", "epic", …). A live store that
-	// still holds the bead supplies it; otherwise the session's copied rows
-	// do, so it is empty only when neither carries one.
+	// Type is the issue's type ("task", "bug", "epic", …).
 	Type string
-	// Updated is the time of the bead's newest word on it: the store's own
-	// updated_at when a store still holds it, else the newest copied row's
-	// updated_at, else the newest copied row's created_at.
+	// Updated is the bead's updated_at as its store holds it.
 	Updated string
-	// Parent is the bead's parent-child parent, empty when it has none. A live
-	// store that still holds the bead supplies it; otherwise the session's
-	// copied rows do.
+	// Parent is the bead's parent-child parent, empty when it has none.
 	Parent string
 }
 
-// row is one line of a session's beads-events.jsonl: a beads event row that
-// sirene copied out of a store, with the issue's title, status, type, updated
-// time and parent-child parent as that store held them at the time. A field is
-// empty on a row sirene wrote before it copied that field.
-type row struct {
-	Store     string `json:"store"`
-	IssueID   string `json:"issue_id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	IssueType string `json:"issue_type"`
-	UpdatedAt string `json:"updated_at"`
-	Parent    string `json:"parent"`
-	CreatedAt string `json:"created_at"`
-}
-
-// lastChange is the latest moment the row knows of for the issue: the store's
-// updated_at when the row carries one, else the event's own time.
-func (r row) lastChange() string {
-	if r.UpdatedAt != "" {
-		return r.UpdatedAt
+// TouchedIn returns the beads that carry the session label for sessionID,
+// sorted by id, read from the main checkout at workDir and each live worktree
+// of it.
+func TouchedIn(ctx context.Context, workDir, sessionID string) ([]Bead, error) {
+	if sessionID == "" {
+		return nil, errors.WithNew("no session id").Err()
 	}
-	return r.CreatedAt
+	return touched(ctx, workDir, labels.Session(sessionID))
 }
 
-// idChunk bounds the ids of one issues query, under SQLite's bound-variable
-// limit.
-const idChunk = 500
+// TouchedByUserIn returns the beads that carry the user label for email,
+// sorted by id, read from the main checkout at workDir and each live worktree
+// of it.
+func TouchedByUserIn(ctx context.Context, workDir, email string) ([]Bead, error) {
+	if email == "" {
+		return nil, errors.WithNew("no email").Err()
+	}
+	return touched(ctx, workDir, labels.User(email))
+}
 
-// TouchedIn returns the beads the session touched, sorted by id: every issue
-// the copied rows of sessionDir name, with a live read of the stores those rows
-// name and of the checkout at workDir filling in what the rows do not carry. A
-// bead whose store was removed, or whose store's events table a br rebuild
-// wiped, is still reported, with what its rows say.
-func TouchedIn(ctx context.Context, sessionDir, workDir string) ([]Bead, error) {
-	rows, err := readRows(sessionDir)
+// touched returns the beads of every store under workDir that carry label.
+func touched(ctx context.Context, workDir, label string) ([]Bead, error) {
+	stores, err := Stores(ctx, workDir)
 	if err != nil {
 		return nil, err
 	}
-	byID := fromRows(rows)
-	for _, store := range storesOf(rows) {
-		if err := enrich(ctx, store, byID); err != nil {
+	byID := map[string]Bead{}
+	for _, store := range stores {
+		beads, err := readStore(store, label)
+		if err != nil {
 			return nil, err
 		}
-	}
-	// The checkout may hold a bead the session's rows name whose own store has
-	// gone, and it holds the current state of a bead that landed. It names no
-	// bead the rows do not.
-	if store, ok := CheckoutStore(workDir); ok {
-		if err := enrich(ctx, store, byID); err != nil {
-			return nil, err
+		for _, b := range beads {
+			byID[b.ID] = newer(byID[b.ID], b)
 		}
 	}
 	out := make([]Bead, 0, len(byID))
@@ -112,270 +85,131 @@ func TouchedIn(ctx context.Context, sessionDir, workDir string) ([]Bead, error) 
 	return out, nil
 }
 
-// fromRows folds the copied rows into one bead per issue. Rows are appended in
-// event order, so a later row carries that store's later word: it wins, and an
-// older one never overwrites a newer. Rows are ordered by the event time; the
-// winning row also gives the issue's type and its updated time, which is the
-// store's own updated_at when the row carries one and the event time otherwise.
-func fromRows(rows []row) map[string]Bead {
-	byID := make(map[string]Bead, len(rows))
-	eventAt := make(map[string]string, len(rows))
-	for _, r := range rows {
-		if r.IssueID == "" {
-			continue
-		}
-		b := byID[r.IssueID]
-		if b.ID != "" && !newer(r.CreatedAt, eventAt[r.IssueID]) {
-			continue
-		}
-		b.ID = r.IssueID
-		eventAt[r.IssueID] = r.CreatedAt
-		if r.Title != "" {
-			b.Title = r.Title
-		}
-		if r.Status != "" {
-			b.Status = r.Status
-		}
-		if r.IssueType != "" {
-			b.Type = r.IssueType
-		}
-		if r.Parent != "" {
-			b.Parent = r.Parent
-		}
-		if at := r.lastChange(); at != "" {
-			b.Updated = at
-		}
-		byID[r.IssueID] = b
-	}
-	return byID
-}
-
-// enrich folds the live issue rows of store into the beads it still holds. The
-// store's row is the current state of a bead, so its fields win, and a store
-// whose row is newer wins over one whose row is older.
-func enrich(ctx context.Context, store string, byID map[string]Bead) error {
-	wanted := make([]string, 0, len(byID))
-	for id := range byID {
-		wanted = append(wanted, id)
-	}
-	if len(wanted) == 0 {
-		return nil
-	}
-	sort.Strings(wanted)
-	for start := 0; start < len(wanted); start += idChunk {
-		end := min(start+idChunk, len(wanted))
-		live, err := readStore(ctx, store, wanted[start:end])
-		if err != nil {
-			return err
-		}
-		for _, row := range live {
-			byID[row.ID] = mergeLive(byID[row.ID], row)
-		}
-	}
-	return nil
-}
-
-// mergeLive folds a live issue row into the bead the rows already named.
-func mergeLive(held, live Bead) Bead {
-	b := held
-	if live.Title != "" {
-		b.Title = live.Title
-	}
-	if live.Status != "" {
-		b.Status = live.Status
-	}
-	if live.Type != "" {
-		b.Type = live.Type
-	}
-	if live.Parent != "" {
-		b.Parent = live.Parent
-	}
-	// The bead's newest word on it. A live store's own updated_at is the
-	// current state, so it wins a tie against a copied row's time.
-	if b.Updated == "" || !newer(b.Updated, live.Updated) {
-		b.Updated = live.Updated
-	}
-	return b
-}
-
-// storesOf returns the distinct stores rows name, in the order they first
-// appear.
-func storesOf(rows []row) []string {
-	var out []string
-	seen := map[string]struct{}{}
-	for _, r := range rows {
-		if r.Store == "" {
-			continue
-		}
-		if _, dup := seen[r.Store]; dup {
-			continue
-		}
-		seen[r.Store] = struct{}{}
-		out = append(out, r.Store)
-	}
-	return out
-}
-
-// readRows returns the copied rows of a session directory. A directory with no
-// beads-events.jsonl holds none; a line that does not parse is skipped, so a
-// torn last line costs only itself.
-func readRows(sessionDir string) ([]row, error) {
-	f, err := os.Open(filepath.Join(sessionDir, beadsEventsFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
-	}
-	defer f.Close()
-	var out []row
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<16), 1<<24)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var r row
-		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			continue
-		}
-		if r.Store == "" || r.IssueID == "" {
-			continue
-		}
-		out = append(out, r)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, errors.With(err, "reading the session's beads events").Set("dir", sessionDir).Err()
-	}
-	return out, nil
-}
-
-// issuesQuery reads the issues of a store in ids, with the parent-child parent
-// of each. It is a template because the id list binds a variable count.
-const issuesQuery = `
-SELECT i.id, i.title, i.status, i.issue_type, CAST(i.updated_at AS TEXT),
-       COALESCE((SELECT d.depends_on_id FROM dependencies d
-                 WHERE d.issue_id = i.id AND d.type = 'parent-child'
-                 ORDER BY d.depends_on_id LIMIT 1), '')
-FROM issues i WHERE i.id IN (%s)`
-
-// readStore returns the issues of store whose ids are ids. A store that holds
-// no database contributes nothing, and one that holds none of the ids
-// contributes nothing.
-func readStore(ctx context.Context, store string, ids []string) ([]Bead, error) {
-	path := filepath.Join(store, databaseName)
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, errors.With(err, "reading beads store").Set("store", store).Err()
-	}
-	db, err := openReadOnly(path)
+// Stores returns the beads stores to read for workDir: the main checkout's and
+// each live worktree's, each after its redirect file, deduplicated and sorted.
+// A checkout with no .beads contributes nothing.
+func Stores(ctx context.Context, workDir string) ([]string, error) {
+	dirs, err := checkouts(ctx, workDir)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
-	args := make([]any, len(ids))
-	marks := make([]string, len(ids))
-	for i, id := range ids {
-		args[i] = id
-		marks[i] = "?"
-	}
-	rows, err := db.QueryContext(ctx, strings.Replace(issuesQuery, "%s", strings.Join(marks, ","), 1), args...)
-	if err != nil {
-		return nil, errors.With(err, "querying beads store").Set("store", store).Err()
-	}
-	defer rows.Close()
-	var out []Bead
-	for rows.Next() {
-		var b Bead
-		if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &b.Updated, &b.Parent); err != nil {
-			return nil, errors.With(err, "reading an issue").Set("store", store).Err()
+	seen := map[string]struct{}{}
+	var out []string
+	for _, dir := range dirs {
+		store, ok := CheckoutStore(dir)
+		if !ok {
+			continue
 		}
-		out = append(out, b)
+		if _, dup := seen[store]; dup {
+			continue
+		}
+		seen[store] = struct{}{}
+		out = append(out, store)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, errors.With(err, "reading issues").Set("store", store).Err()
+	sort.Strings(out)
+	return out, nil
+}
+
+// checkouts returns the working directories to read: workDir's checkout and
+// each live worktree of it. A directory that is not in a git repository is
+// itself alone.
+func checkouts(ctx context.Context, workDir string) ([]string, error) {
+	repo := gitx.Repo{Dir: workDir}
+	out, err := repo.Run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return []string{workDir}, nil
+	}
+	var dirs []string
+	for _, line := range strings.Split(out, "\n") {
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			dirs = append(dirs, path)
+		}
+	}
+	if len(dirs) == 0 {
+		return []string{workDir}, nil
+	}
+	return dirs, nil
+}
+
+// readStore returns the beads of store that carry label.
+func readStore(store, label string) ([]Bead, error) {
+	path := filepath.Join(store, issuesName)
+	f, err := beadsfile.ParseFile(path)
+	if err != nil {
+		return nil, errors.With(err, "reading issues file").Set("path", path).Err()
+	}
+	var out []Bead
+	for _, iss := range f.Issues {
+		if !hasLabel(iss.Obj, label) {
+			continue
+		}
+		out = append(out, beadOf(iss.Obj))
 	}
 	return out, nil
 }
 
-// timeLayouts are the shapes a beads timestamp arrives in: br writes RFC 3339,
-// and SQLite hands a DATETIME column back with a space and an offset.
-var timeLayouts = []string{
-	time.RFC3339Nano,
-	"2006-01-02 15:04:05.999999999-07:00",
-	"2006-01-02 15:04:05.999999999",
-	"2006-01-02 15:04:05",
-}
-
-// newer reports whether a is later than b. A time beats no time; text that does
-// not parse as a time compares as text.
-func newer(a, b string) bool {
-	if a == "" {
+// hasLabel reports whether the issue object carries label.
+func hasLabel(obj *beadsfile.Object, label string) bool {
+	raw := obj.Raw("labels")
+	if len(raw) == 0 {
 		return false
 	}
-	if b == "" {
-		return true
+	var held []string
+	if err := json.Unmarshal(raw, &held); err != nil {
+		return false
 	}
-	at, aok := parseTime(a)
-	bt, bok := parseTime(b)
-	if !aok || !bok {
-		return a > b
-	}
-	return at.After(bt)
+	return labels.Has(held, label)
 }
 
-func parseTime(s string) (time.Time, bool) {
-	for _, layout := range timeLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, true
-		}
-	}
-	return time.Time{}, false
+// beadOf reads the fields the report prints from one issue object.
+func beadOf(obj *beadsfile.Object) Bead {
+	b := Bead{}
+	b.ID, _ = obj.String("id")
+	b.Title, _ = obj.String("title")
+	b.Status, _ = obj.String("status")
+	b.Type, _ = obj.String("issue_type")
+	b.Updated, _ = obj.String("updated_at")
+	b.Parent = parentOf(obj)
+	return b
 }
 
-// openReadOnly opens a beads database so that nothing can write it.
-func openReadOnly(path string) (*sql.DB, error) {
-	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(2000)"}).String()
-	db, err := sql.Open("sqlite", dsn)
+// parentOf returns the issue's parent-child parent, empty when it has none.
+func parentOf(obj *beadsfile.Object) string {
+	raw := obj.Raw("dependencies")
+	if len(raw) == 0 {
+		return ""
+	}
+	deps, err := beadsfile.ParseObjectArray(raw)
 	if err != nil {
-		return nil, errors.With(err, "opening beads store").Set("path", path).Err()
+		return ""
 	}
-	return db, nil
-}
-
-// Locate returns the directory of session id: dir when it is not empty, else
-// the project layer of workDir, else the home's. It reports false when the
-// directory it names does not exist.
-func Locate(workDir, home, id, dir string) (string, bool) {
-	if id == "" {
-		return "", false
-	}
-	candidates := []string{dir}
-	if dir == "" {
-		if workDir != "" {
-			candidates = append(candidates, filepath.Join(workDir, ".sirene", "sessions", id))
-		}
-		if home != "" {
-			candidates = append(candidates, filepath.Join(home, ".sirene", "sessions", id))
-		}
-	}
-	for _, c := range candidates {
-		if c == "" {
+	for _, dep := range deps {
+		if t, _ := dep.String("type"); t != "parent-child" {
 			continue
 		}
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
-			return c, true
+		if id, _ := dep.String("depends_on_id"); id != "" {
+			return id
 		}
 	}
-	return "", false
+	return ""
+}
+
+// newer returns the bead whose updated_at is later. A bead present in several
+// stores is one row, and the newest word on it wins.
+func newer(held, live Bead) Bead {
+	if held.ID == "" {
+		return live
+	}
+	if live.Updated > held.Updated {
+		return live
+	}
+	return held
 }
 
 // CheckoutStore returns the beads store br uses in dir: the nearest .beads at
 // or above dir within its checkout, after its redirect file. It reports false
-// when the checkout has none.
+// when the checkout has none. The path is canonical, so two checkouts that
+// share one store name it the same way.
 func CheckoutStore(dir string) (string, bool) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
@@ -384,7 +218,7 @@ func CheckoutStore(dir string) (string, bool) {
 	for {
 		beads := filepath.Join(dir, beadsDirName)
 		if info, err := os.Stat(beads); err == nil && info.IsDir() {
-			return redirected(beads), true
+			return canonical(redirected(beads)), true
 		}
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return "", false
@@ -395,6 +229,15 @@ func CheckoutStore(dir string) (string, bool) {
 		}
 		dir = parent
 	}
+}
+
+// canonical resolves the links of path, so one store reached by two paths is
+// one store.
+func canonical(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // redirected follows the redirect file of beads as br does: its trimmed content

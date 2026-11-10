@@ -26,6 +26,8 @@ three gaps:
 | `beads-tools land sweep` | Closes issues whose closing commits are already on the main branch. |
 | `beads-tools check` | Applies `land pr`'s rules to a range of commits, for CI. |
 | `beads-tools session S` | Prints the issues a sirene session *S* touched. |
+| `beads-tools session --user E` | Prints the issues a user with email *E* touched. |
+| `beads-tools labels session\|user` | Prints the label that records a session or a user on an issue. |
 
 ## Install
 
@@ -271,6 +273,7 @@ Closes always happen in a throwaway worktree, never in your checkout.
 ```sh
 beads-tools session 01a14743-2ec7-79eb-a9ab-39c56ca73589
 beads-tools session 01a14743-2ec7-79eb-a9ab-39c56ca73589 --json
+beads-tools session --user bryn@signals.io
 ```
 
 It prints one row per issue: its ID, title, status, type, the date it was last
@@ -281,31 +284,38 @@ modified, and the ID of its parent epic (`-` when it has none).
 (`null` when the issue has no parent epic). An empty result is `[]`, never
 `null`. Flags may come before or after the session ID.
 
-The session's own `beads-events.jsonl` names the issues. Sirene copies every
-beads event row its agents wrote into that file, in the session directory, so
-the file records what the session touched. That copy is the membership rule: a
-bead stays in the session's report after the worktree that filed it is removed,
-and after `br` rebuilds a store's database from `issues.jsonl`, which restores
-every issue and no events at all.
+**Membership is a label.** Sirene's `beads-actor` plugin writes
+`session:<session id>` and `user:<escaped email>` on every issue an agent's
+mutating `br` command changed. The labels live in `issues.jsonl`, so they are
+versioned with the branch and survive a removed worktree and a `br` rebuild of a
+database. A session's issues are the ones carrying its session label; a user's
+are the ones carrying their user label.
 
-The stores the file names are then read live, read-only, to fill in what the
-rows do not carry, or to bring a bead up to its current state: its title,
-status, type, last-updated time, and parent epic. Each row already carries all
-five as the store held them when sirene copied it, so an issue whose store is
-gone, or which a rebuild left without the session's rows, is reported from its
-rows alone. The checkout of the working directory is read the same way, which
-brings a bead that has landed up to its current state.
+**The files read are the main checkout's `issues.jsonl` and each live
+worktree's**, found through `git worktree list`, each after its `redirect` file
+as `br` uses it. Nothing else is read: no `beads.db`, no events table, no
+`beads-events.jsonl`. An issue that several stores hold is reported once, with
+the fields of the store whose `updated_at` is newest. Nothing is written.
 
-A store is a `.beads` directory, after its `redirect` file as `br` uses it.
-Nothing is written to any of them.
+`--dir` names the checkout to read (default: the working directory). Name a
+session ID or `--user`, not both.
 
-The session directory is found under `<work-dir>/.sirene/sessions/<id>`, then
-under `<home>/.sirene/sessions/<id>`. `--dir` names it outright; `--work-dir`
-and `--home` change the two searches (defaults: the working directory and
-`$HOME`).
+### The label format
 
-An issue that several stores hold is reported once, with the fields of the row
-modified last. A session with no copied rows reports nothing.
+`br` accepts only `[A-Za-z0-9_-:]` in a label and caps a label at 50 characters,
+so an email cannot be written literally. Every byte outside `[A-Za-z0-9-]` is
+escaped as an underscore and its two lowercase hex digits, which is reversible
+and injective: `bryn@signals.io` becomes `user:bryn_40signals_2eio`. An email
+whose escaped form does not fit keeps a prefix of it and a hash of the email,
+which stays unique but no longer decodes.
+
+```sh
+beads-tools labels session 01a14743-2ec7-79eb-a9ab-39c56ca73589
+beads-tools labels user bryn@signals.io
+```
+
+This is the one definition of the format. Sirene's `beads-actor` plugin follows
+it, and a conformance test in sirene fails when the two drift.
 
 ## Configuration
 

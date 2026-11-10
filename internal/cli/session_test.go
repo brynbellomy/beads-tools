@@ -2,7 +2,6 @@ package cli_test
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,71 +9,67 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/brynbellomy/beads-tools/internal/cli"
+	"github.com/brynbellomy/beads-tools/internal/labels"
 )
 
 const sessionID = "01a14743-2ec7-79eb-a9ab-39c56ca73589"
 
-// sessionSchema is the part of br's schema the session report reads.
-const sessionSchema = `
-CREATE TABLE issues (
-  id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
-  issue_type TEXT NOT NULL DEFAULT 'task', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, event_type TEXT NOT NULL,
-  actor TEXT NOT NULL DEFAULT '', old_value TEXT, new_value TEXT, comment TEXT,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE dependencies (
-  issue_id TEXT NOT NULL, depends_on_id TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'blocks',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '',
-  metadata TEXT DEFAULT '{}', thread_id TEXT DEFAULT '', PRIMARY KEY (issue_id, depends_on_id));
-`
+// issue is one line of an issues.jsonl a test writes.
+type issue struct {
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`
+	IssueType    string   `json:"issue_type"`
+	UpdatedAt    string   `json:"updated_at"`
+	Labels       []string `json:"labels,omitempty"`
+	Dependencies []dep    `json:"dependencies,omitempty"`
+}
 
-// sessionRepo builds a checkout with a beads store and a session directory that
-// names it, and returns the checkout's directory.
+type dep struct {
+	IssueID     string `json:"issue_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"type"`
+}
+
+// writeStore writes a beads store at dir/.beads holding issues.
+func writeStore(t *testing.T, dir string, issues ...issue) string {
+	t.Helper()
+	store := filepath.Join(dir, ".beads")
+	require.NoError(t, os.MkdirAll(store, 0o755))
+	var buf bytes.Buffer
+	for _, iss := range issues {
+		line, err := json.Marshal(iss)
+		require.NoError(t, err)
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(store, "issues.jsonl"), buf.Bytes(), 0o644))
+	return store
+}
+
+// sessionRepo builds a checkout whose store holds one bead of this session, one
+// of another session, and one of this user.
 func sessionRepo(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	repo := filepath.Join(root, "repo")
-	store := filepath.Join(repo, ".beads")
-	require.NoError(t, os.MkdirAll(store, 0o755))
+	repo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
-
-	db, err := sql.Open("sqlite", filepath.Join(store, "beads.db"))
-	require.NoError(t, err)
-	defer db.Close()
-	_, err = db.Exec(sessionSchema)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO issues (id, title, status, issue_type, updated_at) VALUES
-		('t-epic', 'the epic', 'open', 'epic', '2026-10-01T00:00:00+00:00'),
-		('t-a', 'a child', 'in_progress', 'bug', '2026-10-19T01:10:24+00:00'),
-		('t-b', 'another session''s', 'open', 'task', '2026-10-19T01:10:24+00:00')`)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES ('t-a', 't-epic', 'parent-child')`)
-	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO events (issue_id, event_type, actor) VALUES
-		('t-a', 'created', 'agent:` + sessionID + `/engineer-e96b44ea'),
-		('t-b', 'created', 'agent:019f0000-0000-7000-8000-000000000000/engineer')`)
-	require.NoError(t, err)
-
-	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "beads-events.jsonl"),
-		[]byte(`{"store":"`+store+`","issue_id":"t-a","event_type":"created","actor":"agent:`+sessionID+`/engineer-e96b44ea"}`+"\n"), 0o644))
+	writeStore(t, repo,
+		issue{ID: "t-epic", Title: "the epic", Status: "open", IssueType: "epic", UpdatedAt: "2026-10-01T00:00:00Z"},
+		issue{ID: "t-a", Title: "a child", Status: "in_progress", IssueType: "bug", UpdatedAt: "2026-10-19T01:10:24Z",
+			Labels: []string{labels.Session(sessionID), labels.User("bryn@signals.io")},
+			Dependencies: []dep{{IssueID: "t-a", DependsOnID: "t-epic", Type: "parent-child"}}},
+		issue{ID: "t-b", Title: "another session's", Status: "open", IssueType: "task", UpdatedAt: "2026-10-19T01:10:24Z",
+			Labels: []string{labels.Session("019f0000-0000-7000-8000-000000000000")}},
+	)
 	return repo
 }
 
 func runSession(t *testing.T, dir string, args ...string) (int, string) {
 	t.Helper()
-	// --home names an empty directory so no test reads the operator's home.
-	argv := append([]string{"session"}, args...)
-	argv = append(argv, "--home", t.TempDir())
-	return runSessionArgv(t, dir, argv...)
+	return runSessionArgv(t, dir, append([]string{"session"}, args...)...)
 }
 
 // runSessionArgv runs the binary with argv as it is, so a test can place flags
@@ -105,59 +100,78 @@ func TestSession_PrintsTheBeadsTheSessionTouched(t *testing.T) {
 	require.Contains(t, out, "a child")
 	require.Contains(t, out, "in_progress")
 	require.Contains(t, out, "bug")
-	require.Contains(t, out, "2026-10-19T01:10:24+00:00")
+	require.Contains(t, out, "2026-10-19T01:10:24Z")
 	require.Contains(t, out, "t-epic")
 	require.NotContains(t, out, "t-b", "another session's bead is not reported")
 }
 
-func TestSession_AnUnknownSessionIsAnError(t *testing.T) {
+func TestSession_AnUnknownSessionReportsNoBeads(t *testing.T) {
 	repo := sessionRepo(t)
 
-	code, out := runSession(t, repo, "019f0000-0000-7000-8000-000000000000")
-	require.Equal(t, cli.ExitError, code, out)
-	require.Contains(t, out, "no session")
-}
-
-func TestSession_AnExplicitDirNamesTheSession(t *testing.T) {
-	repo := sessionRepo(t)
-	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
-
-	code, out := runSession(t, t.TempDir(), sessionID, "--dir", dir, "--work-dir", repo)
+	code, out := runSession(t, repo, "019f0000-0000-7000-8000-00000000ffff", "--json")
 	require.Equal(t, cli.ExitOK, code, out)
-	require.Contains(t, out, "t-a")
+	require.Equal(t, "[]\n", out, "a session that touched nothing is an empty list")
 }
 
-func TestSession_ReportsABeadWhoseWorktreeWasRemoved(t *testing.T) {
+func TestSession_ReadsEveryLiveWorktree(t *testing.T) {
 	repo := sessionRepo(t)
-	// A worktree that filed a bead and was then removed: the session's rows
-	// name it, and its store is gone.
-	gone := filepath.Join(t.TempDir(), "removed-worktree", ".beads")
-	appendCopiedRow(t, repo, gone, "t-gone", "filed in a worktree since removed", "open", "2026-10-19T01:10:24+00:00")
-	require.NoDirExists(t, gone)
+	// A linked worktree with its own store, holding a bead of this session.
+	wt := filepath.Join(t.TempDir(), "wt")
+	initGitRepo(t, repo, wt)
+	writeStore(t, wt, issue{ID: "t-wt", Title: "filed in a worktree", Status: "open", IssueType: "task",
+		UpdatedAt: "2026-10-20T00:00:00Z", Labels: []string{labels.Session(sessionID)}})
 
 	code, out := runSession(t, repo, sessionID, "--json")
 	require.Equal(t, cli.ExitOK, code, out)
 	var got []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	require.Len(t, got, 2, "the removed worktree's bead is still the session's")
-	byID := map[string]map[string]any{}
+	ids := map[string]bool{}
 	for _, b := range got {
-		byID[b["id"].(string)] = b
+		ids[b["id"].(string)] = true
 	}
-	require.Equal(t, "filed in a worktree since removed", byID["t-gone"]["title"])
-	require.Equal(t, "open", byID["t-gone"]["status"])
-	require.Equal(t, "", byID["t-gone"]["type"], "no store can supply a type")
+	require.True(t, ids["t-a"], "the main checkout's bead is reported")
+	require.True(t, ids["t-wt"], "the worktree's bead is reported")
+	require.False(t, ids["t-b"], "another session's bead is not")
 }
 
-func TestSession_HasNoActorFormatFlag(t *testing.T) {
+// initGitRepo makes repo a git repository with wt as a linked worktree, so
+// `git worktree list` names both.
+func initGitRepo(t *testing.T, repo, wt string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	git(repo, "init", "-q")
+	git(repo, "config", "user.email", "t@example.com")
+	git(repo, "config", "user.name", "t")
+	git(repo, "add", "-A")
+	git(repo, "commit", "-q", "-m", "seed")
+	git(repo, "worktree", "add", "-q", "--detach", wt)
+}
+
+func TestSession_UserFlagReportsTheUsersBeads(t *testing.T) {
 	repo := sessionRepo(t)
 
-	code, out := runSession(t, repo, sessionID, "--actor-format", "agent:{agent}")
-	require.Equal(t, cli.ExitError, code, out)
-	require.Contains(t, out, "flag provided but not defined", "membership no longer depends on an actor format")
+	code, out := runSession(t, repo, "--user", "bryn@signals.io", "--json")
+	require.Equal(t, cli.ExitOK, code, out)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got, 1)
+	require.Equal(t, "t-a", got[0]["id"])
 }
 
-func TestSession_NeedsASessionID(t *testing.T) {
+func TestSession_UserFlagAndASessionIDAreRefusedTogether(t *testing.T) {
+	repo := sessionRepo(t)
+
+	code, out := runSession(t, repo, sessionID, "--user", "bryn@signals.io")
+	require.Equal(t, cli.ExitError, code, out)
+	require.Contains(t, out, "not both")
+}
+
+func TestSession_NeedsASessionIDOrAUser(t *testing.T) {
 	repo := sessionRepo(t)
 
 	code, out := runSessionArgv(t, repo, "session")
@@ -173,8 +187,8 @@ func TestSession_HelpPrintsUsageAndExitsZero(t *testing.T) {
 			code, out := runSessionArgv(t, repo, "session", flag)
 			require.Equal(t, cli.ExitOK, code, out)
 			require.Contains(t, out, "beads-tools session SESSION-ID")
+			require.Contains(t, out, "--user")
 			require.Contains(t, out, "--json")
-			require.NotContains(t, out, "no session", "help is not a session id")
 		})
 	}
 }
@@ -200,87 +214,40 @@ func TestSession_JSONPrintsAnArrayOfBeads(t *testing.T) {
 		"title":       "a child",
 		"status":      "in_progress",
 		"type":        "bug",
-		"updated_at":  "2026-10-19T01:10:24+00:00",
+		"updated_at":  "2026-10-19T01:10:24Z",
 		"parent_epic": "t-epic",
 	}, got[0])
 }
 
-// appendCopiedRow appends one row to the repo's session beads-events.jsonl, as
-// sirene would when it copies the session's beads events.
-func appendCopiedRow(t *testing.T, repo, store, issueID, title, status, at string) {
-	t.Helper()
-	f, err := os.OpenFile(filepath.Join(repo, ".sirene", "sessions", sessionID, "beads-events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
-	require.NoError(t, err)
-	_, err = f.WriteString(`{"store":"` + store + `","issue_id":"` + issueID + `","event_type":"created",` +
-		`"actor":"agent:` + sessionID + `/engineer","title":"` + title + `","status":"` + status +
-		`","created_at":"` + at + `"}` + "\n")
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-}
-
 func TestSession_JSONPrintsNullForNoParent(t *testing.T) {
-	repo := sessionRepo(t)
-	// A bead with no parent-child dependency, named by a copied row.
-	db, err := sql.Open("sqlite", filepath.Join(repo, ".beads", "beads.db"))
-	require.NoError(t, err)
-	defer db.Close()
-	_, err = db.Exec(`INSERT INTO issues (id, title, status, issue_type, updated_at)
-		VALUES ('t-c', 'no parent', 'open', 'task', '2026-10-20T00:00:00+00:00')`)
-	require.NoError(t, err)
-	appendCopiedRow(t, repo, filepath.Join(repo, ".beads"), "t-c", "no parent", "open", "2026-10-20T00:00:00+00:00")
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+	writeStore(t, repo, issue{ID: "t-c", Title: "no parent", Status: "open", IssueType: "task",
+		UpdatedAt: "2026-10-20T00:00:00Z", Labels: []string{labels.Session(sessionID)}})
 
 	code, out := runSession(t, repo, sessionID, "--json")
 	require.Equal(t, cli.ExitOK, code, out)
 	var got []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	require.Len(t, got, 2)
-	require.Equal(t, "t-c", got[1]["id"])
-	require.Contains(t, got[1], "parent_epic", "the key is present")
-	require.Nil(t, got[1]["parent_epic"], "and null")
+	require.Len(t, got, 1)
+	require.Contains(t, got[0], "parent_epic", "the key is present")
+	require.Nil(t, got[0]["parent_epic"], "and null")
 }
 
 func TestSession_JSONPrintsAnEmptyArrayForNoBeads(t *testing.T) {
-	// A session directory that names no store, in a checkout with no beads.
 	empty := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(empty, ".git"), 0o755))
-	dir := filepath.Join(empty, ".sirene", "sessions", sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
 
-	code, out := runSessionArgv(t, empty, "session", sessionID, "--dir", dir, "--json", "--home", t.TempDir())
+	code, out := runSessionArgv(t, empty, "session", sessionID, "--json")
 	require.Equal(t, cli.ExitOK, code, out)
 	require.Equal(t, "[]\n", out, "an empty result is [], not null")
-}
-
-// TestSession_ShowsTheCopysTypeUpdatedAndParentWhenTheStoreIsGone pins the copy
-// as the fallback: the row carries the type, the last-updated time and the
-// parent epic, so a bead filed in a worktree that was since removed shows all
-// three.
-func TestSession_ShowsTheCopysTypeUpdatedAndParentWhenTheStoreIsGone(t *testing.T) {
-	root := t.TempDir()
-	gone := filepath.Join(root, "removed-worktree", ".beads")
-	dir := filepath.Join(root, ".sirene", "sessions", sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	rowJSON := `{"store":"` + gone + `","issue_id":"t-gone","event_type":"status_changed",` +
-		`"actor":"agent:` + sessionID + `/engineer","title":"filed in a worktree since removed",` +
-		`"status":"closed","issue_type":"bug","updated_at":"2026-10-19T03:40:00+00:00",` +
-		`"parent":"t-epic","created_at":"2026-10-18T09:00:00+00:00"}` + "\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "beads-events.jsonl"), []byte(rowJSON), 0o644))
-
-	code, out := runSessionArgv(t, t.TempDir(), "session", sessionID, "--dir", dir, "--json", "--home", t.TempDir())
-	require.Equal(t, cli.ExitOK, code, out)
-	var got []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	require.Len(t, got, 1)
-	require.Equal(t, "bug", got[0]["type"], "the copy's type stands when the store is gone")
-	require.Equal(t, "2026-10-19T03:40:00+00:00", got[0]["updated_at"], "and the time it last changed")
-	require.Equal(t, "t-epic", got[0]["parent_epic"], "and its parent epic")
 }
 
 func TestSession_FlagsWorkBeforeAndAfterTheSessionID(t *testing.T) {
 	repo := sessionRepo(t)
 
-	before, outBefore := runSessionArgv(t, repo, "session", "--json", sessionID, "--home", t.TempDir())
-	after, outAfter := runSessionArgv(t, repo, "session", sessionID, "--json", "--home", t.TempDir())
+	before, outBefore := runSessionArgv(t, repo, "session", "--json", sessionID)
+	after, outAfter := runSessionArgv(t, repo, "session", sessionID, "--json")
 	require.Equal(t, cli.ExitOK, before, outBefore)
 	require.Equal(t, cli.ExitOK, after, outAfter)
 	require.Equal(t, outAfter, outBefore, "the flag's position does not change the report")
@@ -289,10 +256,25 @@ func TestSession_FlagsWorkBeforeAndAfterTheSessionID(t *testing.T) {
 
 func TestSession_AFlagValueIsNotASessionID(t *testing.T) {
 	repo := sessionRepo(t)
-	dir := filepath.Join(repo, ".sirene", "sessions", sessionID)
 
 	// --dir's value must not be read as the session id.
-	code, out := runSessionArgv(t, repo, "session", "--dir", dir, sessionID, "--home", t.TempDir())
+	code, out := runSessionArgv(t, repo, "session", "--dir", repo, sessionID)
 	require.Equal(t, cli.ExitOK, code, out)
 	require.Contains(t, out, "t-a")
+}
+
+// TestSession_ReadsNoDatabase pins the ruling: membership is the label in
+// issues.jsonl, so a store whose database names the bead but whose file does
+// not is not reported, and one whose file names it but which has no database at
+// all is.
+func TestSession_ReadsNoDatabase(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+	store := writeStore(t, repo, issue{ID: "t-a", Title: "labelled", Status: "open", IssueType: "task",
+		UpdatedAt: "2026-10-19T01:10:24Z", Labels: []string{labels.Session(sessionID)}})
+	require.NoFileExists(t, filepath.Join(store, "beads.db"), "the store has no database at all")
+
+	code, out := runSession(t, repo, sessionID, "--json")
+	require.Equal(t, cli.ExitOK, code, out)
+	require.Contains(t, out, `"t-a"`)
 }

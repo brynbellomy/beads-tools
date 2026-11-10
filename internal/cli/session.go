@@ -13,36 +13,30 @@ import (
 
 // sessionUsage is the help of the session subcommand.
 const sessionUsage = `usage:
-  beads-tools session SESSION-ID [--dir DIR] [--work-dir DIR] [--home DIR]
-                    [--json]
+  beads-tools session SESSION-ID [--dir DIR] [--json]
+  beads-tools session --user EMAIL [--dir DIR] [--json]
 
-Print the beads a sirene session touched: each bead's id, title, status, type,
-the date it was last modified and its parent epic.
+Print the beads a session or a user touched: each bead's id, title, status,
+type, the date it was last modified and its parent epic.
 
-The session's own beads-events.jsonl names the beads. Sirene copies every beads
-event row its agents wrote into that file, so it outlives the removal of a
-worktree and a br rebuild of a store's database. Each row carries the issue's
-title, status, type, last-updated time and parent epic as its store held them.
-The stores the file names are read live, read-only, to bring a bead up to its
-current state; a bead whose store is gone is reported with what the rows say.
+Membership is a label br writes on the bead: session:<session id> for a session
+and user:<escaped email> for a user. The labels live in issues.jsonl, so they
+are versioned with the branch. The files read are the main checkout's and each
+live worktree's, and nothing else: no beads database and no events table.
 
 flags:
-  --dir DIR              the session's directory (default: found under
-                         --work-dir, then --home)
-  --work-dir DIR         the project whose session store holds the session
-                         (default: the working directory)
-  --home DIR             the sirene home whose session store holds the session
-                         (default: $HOME)
+  --user EMAIL           report the beads this user touched instead of a
+                         session's
+  --dir DIR              the checkout to read (default: the working directory)
   --json                 print a JSON array instead of a table
 `
 
-// runSession prints the beads a sirene session touched.
+// runSession prints the beads a session or a user touched.
 func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("session", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "the session's directory (default: found under --work-dir, then --home)")
-	workDir := fs.String("work-dir", "", "the project whose session store holds the session (default: the working directory)")
-	home := fs.String("home", "", "the sirene home whose session store holds the session (default: $HOME)")
+	user := fs.String("user", "", "report the beads this user touched instead of a session's")
+	dir := fs.String("dir", "", "the checkout to read (default: the working directory)")
 	asJSON := fs.Bool("json", false, "print a JSON array instead of a table")
 
 	flags, positional, help := splitArgs(fs, args)
@@ -53,33 +47,30 @@ func runSession(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if err := fs.Parse(flags); err != nil {
 		return ExitError
 	}
-	if len(positional) != 1 {
-		fmt.Fprint(stderr, usage)
+	if *user != "" && len(positional) != 0 {
+		fmt.Fprint(stderr, "beads-tools: name a session id or --user, not both\n\n"+sessionUsage)
 		return ExitError
 	}
-	id := positional[0]
-
-	if *workDir == "" {
+	if *user == "" && len(positional) != 1 {
+		fmt.Fprint(stderr, sessionUsage)
+		return ExitError
+	}
+	if *dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintf(stderr, "beads-tools: %v\n", err)
 			return ExitError
 		}
-		*workDir = wd
+		*dir = wd
 	}
-	if *home == "" {
-		*home = os.Getenv("HOME")
+
+	var beads []sessionbeads.Bead
+	var err error
+	if *user != "" {
+		beads, err = sessionbeads.TouchedByUserIn(ctx, *dir, *user)
+	} else {
+		beads, err = sessionbeads.TouchedIn(ctx, *dir, positional[0])
 	}
-	sessionDir, ok := sessionbeads.Locate(*workDir, *home, id, *dir)
-	if !ok {
-		if *dir != "" {
-			fmt.Fprintf(stderr, "beads-tools: no session directory at %s\n", *dir)
-		} else {
-			fmt.Fprintf(stderr, "beads-tools: no session %q under %s or %s\n", id, *workDir, *home)
-		}
-		return ExitError
-	}
-	beads, err := sessionbeads.TouchedIn(ctx, sessionDir, *workDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "beads-tools: %v\n", err)
 		return ExitError

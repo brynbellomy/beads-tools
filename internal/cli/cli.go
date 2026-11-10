@@ -52,15 +52,18 @@ usage:
         the issues file at head, and refuses a dependency cycle head adds
         that neither base nor the merge base holds; exits 1 when any fails.
         Needs only git, for CI.
-  beads-tools session SESSION-ID [--dir DIR] [--work-dir DIR] [--home DIR]
-                 [--json]
-        print the beads a sirene session touched: its id, title, status,
-        type, the date it was last modified and its parent epic. The session's
-        own beads-events.jsonl names them, so a bead stays reported after its
-        worktree is removed or br rebuilds its store. The stores the file
-        names are read live, read-only, for the type, the parent epic and a
-        fresher title and status. --json prints a JSON array instead of a
-        table.
+  beads-tools session SESSION-ID [--dir DIR] [--json]
+  beads-tools session --user EMAIL [--dir DIR] [--json]
+        print the beads a session or a user touched: its id, title, status,
+        type, the date it was last modified and its parent epic. Membership is
+        a label br writes on the bead (session:<id>, user:<escaped email>),
+        read from the main checkout's issues.jsonl and each live worktree's.
+        --json prints a JSON array instead of a table.
+  beads-tools labels session SESSION-ID
+  beads-tools labels user EMAIL
+        print the label that records a session or a user on a bead. This is
+        the one definition of the format; sirene's beads-actor plugin follows
+        it.
 
 --require-trailers overrides beadstools.requireTrailers for one run.
 --admin makes both land commands merge with gh pr merge --admin.
@@ -134,6 +137,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runLand(ctx, repo, args[1:], stdout, stderr)
 	case "session":
 		return runSession(ctx, args[1:], stdout, stderr)
+	case "labels":
+		return runLabels(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return ExitOK
