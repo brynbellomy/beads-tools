@@ -237,6 +237,11 @@ asked about them, so close the finished ones by hand.
 Both accept `--dry-run` (print the plan, change nothing) and `--no-merge`
 (push and open, but leave merging to a person).
 
+Both accept `--admin`, which passes `--admin` to `gh pr merge`, for
+repositories whose branch protection rules refuse the merge unless an
+administrator bypasses them. The merge is still pinned to the head the command
+pushed.
+
 Both skip issues whose closing commit was reverted (git's standard
 `This reverts commit <sha>.` line), and each issue's close reason cites the
 oldest commit that closes it.

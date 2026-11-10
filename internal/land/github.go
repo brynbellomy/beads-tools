@@ -35,9 +35,11 @@ type GitHub interface {
 	Merge(ctx context.Context, ref, headSHA, method string) error
 }
 
-// GH drives GitHub through the gh CLI from Dir.
+// GH drives GitHub through the gh CLI from Dir. Admin passes --admin to gh pr
+// merge, which merges past branch protection rules the caller may bypass.
 type GH struct {
-	Dir string
+	Dir   string
+	Admin bool
 }
 
 // View implements GitHub.
@@ -66,13 +68,26 @@ func (g GH) Create(ctx context.Context, base, head, title, body string) (string,
 
 // Merge implements GitHub.
 func (g GH) Merge(ctx context.Context, ref, headSHA, method string) error {
+	args, err := g.mergeArgs(ref, headSHA, method)
+	if err != nil {
+		return err
+	}
+	_, err = gitx.Command(ctx, g.Dir, "gh", args...)
+	return classifyMergeError(err)
+}
+
+// mergeArgs is the gh command line that merges ref.
+func (g GH) mergeArgs(ref, headSHA, method string) ([]string, error) {
 	switch method {
 	case "merge", "squash", "rebase":
 	default:
-		return errors.WithNew("unknown merge method").Set("method", method).Err()
+		return nil, errors.WithNew("unknown merge method").Set("method", method).Err()
 	}
-	_, err := gitx.Command(ctx, g.Dir, "gh", "pr", "merge", ref, "--"+method, "--match-head-commit", headSHA)
-	return classifyMergeError(err)
+	args := []string{"pr", "merge", ref, "--" + method, "--match-head-commit", headSHA}
+	if g.Admin {
+		args = append(args, "--admin")
+	}
+	return args, nil
 }
 
 // classifyMergeError marks gh's "Base branch was modified" refusal with

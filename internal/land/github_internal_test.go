@@ -17,3 +17,16 @@ func TestClassifyMergeError_MarksOnlyTheBaseBranchRace(t *testing.T) {
 	require.NotErrorIs(t, classifyMergeError(ghErr("Pull request is not mergeable: the base branch policy prohibits the merge.")), ErrBaseModified)
 	require.NoError(t, classifyMergeError(nil))
 }
+
+func TestMergeArgs_AdminAddsTheFlag(t *testing.T) {
+	args, err := GH{}.mergeArgs("3", "abc", "squash")
+	require.NoError(t, err)
+	require.Equal(t, []string{"pr", "merge", "3", "--squash", "--match-head-commit", "abc"}, args)
+
+	args, err = GH{Admin: true}.mergeArgs("3", "abc", "merge")
+	require.NoError(t, err)
+	require.Equal(t, []string{"pr", "merge", "3", "--merge", "--match-head-commit", "abc", "--admin"}, args)
+
+	_, err = GH{Admin: true}.mergeArgs("3", "abc", "fast-forward")
+	require.Error(t, err)
+}

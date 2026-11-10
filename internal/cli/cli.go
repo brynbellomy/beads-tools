@@ -38,12 +38,12 @@ usage:
         check a commit message's Closes:/Refs: trailers; refuses a staged
         issues file that adds duplicate comment ids or a dependency cycle
   beads-tools land pr NUMBER [--dry-run] [--no-merge] [--close ID]... [--keep-open]
-                 [--require-trailers=BOOL]
+                 [--require-trailers=BOOL] [--admin]
         close the issues a pull request's commits close, on its branch,
         then merge it. issues it only references (Refs:) need a decision:
         --close each one it finishes, or --keep-open. refuses an issues file
         with duplicate comment ids or a dependency cycle the base lacks
-  beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN]
+  beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN] [--admin]
         close issues whose closing commits are already on the main branch,
         through a pull request
   beads-tools check [--base REV] [--head REV] [--require-trailers=BOOL]
@@ -63,6 +63,7 @@ usage:
         table.
 
 --require-trailers overrides beadstools.requireTrailers for one run.
+--admin makes both land commands merge with gh pr merge --admin.
 
 git config (all optional):
   beadstools.remote           remote to publish to (origin)
@@ -193,8 +194,10 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 	fs.SetOutput(stderr)
 	var opts land.Options
 	var requireTrailers *bool
+	var admin bool
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&opts.NoMerge, "no-merge", false, "push and open, but leave merging to a person")
+	fs.BoolVar(&admin, "admin", false, "merge with gh pr merge --admin, past branch protection rules you may bypass")
 	if args[0] == "pr" {
 		fs.Func("close", "close an issue the PR finishes but only references (repeatable)", func(id string) error {
 			opts.Close = append(opts.Close, id)
@@ -214,7 +217,7 @@ func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr 
 	}
 	l := &land.Lander{
 		Repo:   repo,
-		GitHub: land.GH{Dir: repo.Dir},
+		GitHub: land.GH{Dir: repo.Dir, Admin: admin},
 		Beads:  land.BR{},
 		Out:    stdout,
 		Now:    time.Now,
