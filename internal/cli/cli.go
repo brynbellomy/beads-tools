@@ -191,73 +191,98 @@ func runMerge(args []string, stderr io.Writer) int {
 }
 
 func runLand(ctx context.Context, repo gitx.Repo, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+	cmd, ok := parseLand(ctx, repo, args, stderr)
+	if !ok {
 		return ExitError
 	}
-	fs := flag.NewFlagSet("land "+args[0], flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	var opts land.Options
-	var requireTrailers *bool
-	var admin bool
-	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan and change nothing")
-	fs.BoolVar(&opts.NoMerge, "no-merge", false, "push and open, but leave merging to a person")
-	fs.BoolVar(&admin, "admin", false, "merge with gh pr merge --admin, past branch protection rules you may bypass")
-	if args[0] == "pr" {
-		fs.Func("close", "close an issue the PR finishes but only references (repeatable)", func(id string) error {
-			opts.Close = append(opts.Close, id)
-			return nil
-		})
-		fs.BoolVar(&opts.KeepOpen, "keep-open", false, "confirm the issues the PR references and does not close stay open")
-		requireTrailers = fs.Bool("require-trailers", repo.ConfigBool(ctx, "beadstools.requireTrailers", true), "require a Closes:/Refs: trailer on every commit (overrides beadstools.requireTrailers)")
-	}
-	if args[0] == "sweep" {
-		fs.StringVar(&opts.Since, "since", land.DefaultSince, "how far back to report referenced issues that are still open (git log --since)")
-	}
-
 	self, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(stderr, "beads-tools: locating own binary: %v\n", err)
 		return ExitError
 	}
-	l := &land.Lander{
+	if err := cmd.run(ctx, cmd.lander(repo, self, stdout)); err != nil {
+		fmt.Fprintf(stderr, "beads-tools: %v\n", err)
+		return ExitError
+	}
+	return ExitOK
+}
+
+// landCommand is a parsed land pr or land sweep command line.
+type landCommand struct {
+	sub   string
+	pr    int
+	opts  land.Options
+	admin bool
+}
+
+// parseLand parses args (the subcommand and its flags), reporting problems to
+// stderr.
+func parseLand(ctx context.Context, repo gitx.Repo, args []string, stderr io.Writer) (landCommand, bool) {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage)
+		return landCommand{}, false
+	}
+	c := landCommand{sub: args[0]}
+	fs := flag.NewFlagSet("land "+c.sub, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var requireTrailers *bool
+	fs.BoolVar(&c.opts.DryRun, "dry-run", false, "print the plan and change nothing")
+	fs.BoolVar(&c.opts.NoMerge, "no-merge", false, "push and open, but leave merging to a person")
+	fs.BoolVar(&c.admin, "admin", false, "merge with gh pr merge --admin, past branch protection rules you may bypass")
+	var flags []string
+	switch c.sub {
+	case "pr":
+		fs.Func("close", "close an issue the PR finishes but only references (repeatable)", func(id string) error {
+			c.opts.Close = append(c.opts.Close, id)
+			return nil
+		})
+		fs.BoolVar(&c.opts.KeepOpen, "keep-open", false, "confirm the issues the PR references and does not close stay open")
+		requireTrailers = fs.Bool("require-trailers", repo.ConfigBool(ctx, "beadstools.requireTrailers", true), "require a Closes:/Refs: trailer on every commit (overrides beadstools.requireTrailers)")
+		if len(args) < 2 {
+			fmt.Fprint(stderr, usage)
+			return landCommand{}, false
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "beads-tools: %q is not a pull request number\n", args[1])
+			return landCommand{}, false
+		}
+		c.pr, flags = n, args[2:]
+	case "sweep":
+		fs.StringVar(&c.opts.Since, "since", land.DefaultSince, "how far back to report referenced issues that are still open (git log --since)")
+		flags = args[1:]
+	default:
+		fmt.Fprintf(stderr, "beads-tools: unknown land command %q\n", c.sub)
+		return landCommand{}, false
+	}
+	if fs.Parse(flags) != nil {
+		return landCommand{}, false
+	}
+	if requireTrailers != nil {
+		c.opts.TrailersOptional = !*requireTrailers
+	}
+	return c, true
+}
+
+// lander builds the Lander that runs c; self is the binary git runs as the
+// issues file's merge driver.
+func (c landCommand) lander(repo gitx.Repo, self string, out io.Writer) *land.Lander {
+	return &land.Lander{
 		Repo:   repo,
-		GitHub: land.GH{Dir: repo.Dir, Admin: admin},
+		GitHub: land.GH{Dir: repo.Dir, Admin: c.admin},
 		Beads:  land.BR{},
-		Out:    stdout,
+		Out:    out,
 		Now:    time.Now,
 
 		MergeRetryDelay: 5 * time.Second,
 		MergeDriver:     land.DriverCommand(self),
 	}
-	switch args[0] {
-	case "pr":
-		if len(args) < 2 {
-			fmt.Fprint(stderr, usage)
-			return ExitError
-		}
-		n, convErr := strconv.Atoi(args[1])
-		if convErr != nil {
-			fmt.Fprintf(stderr, "beads-tools: %q is not a pull request number\n", args[1])
-			return ExitError
-		}
-		if fs.Parse(args[2:]) != nil {
-			return ExitError
-		}
-		opts.TrailersOptional = !*requireTrailers
-		err = l.PR(ctx, n, opts)
-	case "sweep":
-		if fs.Parse(args[1:]) != nil {
-			return ExitError
-		}
-		err = l.Sweep(ctx, opts)
-	default:
-		fmt.Fprintf(stderr, "beads-tools: unknown land command %q\n", args[0])
-		return ExitError
+}
+
+// run runs c with l.
+func (c landCommand) run(ctx context.Context, l *land.Lander) error {
+	if c.sub == "pr" {
+		return l.PR(ctx, c.pr, c.opts)
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "beads-tools: %v\n", err)
-		return ExitError
-	}
-	return ExitOK
+	return l.Sweep(ctx, c.opts)
 }
