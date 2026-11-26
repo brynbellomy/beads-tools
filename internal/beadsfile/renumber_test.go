@@ -158,15 +158,20 @@ func TestNewRenumberedComments_ASharedIDWithinOneBeadIsARepair(t *testing.T) {
 	require.Empty(t, moved, "the second comment steps off a shared id; that is the repair")
 }
 
-func TestCommentKeys_NameEachCommentWithinItsIssue(t *testing.T) {
+func TestNewCommentKey_IdenticalCommentsHaveOneIdentity(t *testing.T) {
 	same := `{"author":"x","text":"n","created_at":"2026-01-01T00:00:00Z"}`
 	cs, err := beadsfile.ParseObjectArray([]byte("[" + same + "," + same + "]"))
 	require.NoError(t, err)
 
-	keys := beadsfile.CommentKeys("t-a", cs)
-	require.Equal(t, []int{0, 1}, []int{keys[0].Occurrence, keys[1].Occurrence})
-	require.Equal(t, "t-a", keys[0].IssueID)
-	require.NotEqual(t, keys[0], keys[1])
+	first := beadsfile.NewCommentKey("t-a", cs[0])
+	second := beadsfile.NewCommentKey("t-a", cs[1])
+	require.Equal(t, first, second)
+	require.Equal(t, "t-a", first.IssueID)
+
+	respelled := `{"author":"x","text":"n","created_at":"2026-01-01T01:00:00+01:00"}`
+	cs, err = beadsfile.ParseObjectArray([]byte("[" + respelled + "]"))
+	require.NoError(t, err)
+	require.Equal(t, first, beadsfile.NewCommentKey("t-a", cs[0]))
 }
 
 // The exemption for an id a parent carried twice must key on the comment doing
@@ -204,10 +209,10 @@ func TestNewRenumberedComments_ASharedIDDoesNotExcuseARenumberInAMerge(t *testin
 	require.Equal(t, int64(19), moved[0].Now)
 }
 
-// Occurrence is a position among identical comments, so it must not decide the
-// answer: inserting or deleting one identical comment earlier in the file shifts
-// every later occurrence without changing which comment is which. What matters
-// is the multiset of ids the parent held for an identity.
+// Position among identical comments must not decide the answer: inserting or
+// deleting one earlier in the file shifts every later position without changing
+// which comment is which. What matters is the multiset of ids the parent held
+// for an identity.
 func TestNewRenumberedComments_PositionAmongIdenticalCommentsIsNotARenumber(t *testing.T) {
 	const same = "7 same"
 	three := parseRows(t, issueWith("t-a", same, same, "8 third"))
@@ -246,8 +251,8 @@ func TestNewRenumberedComments_PositionAmongIdenticalCommentsIsNotARenumber(t *t
 
 // Two byte-identical comments on one bead are interchangeable, so which of them
 // carries which id is not observable: a reordering keeps the same multiset of
-// ids for that identity and must not be refused. Occurrence is a position in
-// the file, so keying on it here refuses a change that renumbered nothing.
+// ids for that identity and must not be refused. Position is not part of the
+// shared CommentKey, so reordering refuses nothing.
 func TestNewRenumberedComments_AReorderOfIdenticalCommentsIsNotARenumber(t *testing.T) {
 	before := parseRows(t, issueWith("t-a", "7 same", "8 same"))
 	swapped := parseRows(t, issueWith("t-a", "8 same", "7 same"))

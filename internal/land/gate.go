@@ -33,7 +33,7 @@ func FindRenumbered(ctx context.Context, repo gitx.Repo, commits []trailers.Comm
 	cache := newFilesAt(repo)
 	var out []Renumbered
 	for _, c := range commits {
-		head, err := cache.at(ctx, c.SHA)
+		head, err := cache.commentIndex(ctx, c.SHA)
 		if err != nil {
 			return nil, err
 		}
@@ -44,7 +44,7 @@ func FindRenumbered(ctx context.Context, repo gitx.Repo, commits []trailers.Comm
 		if err != nil {
 			return nil, err
 		}
-		moved, err := beadsfile.NewRenumberedComments(head, parents...)
+		moved, err := head.RenumberedComments(parents...)
 		if err != nil {
 			return nil, err
 		}

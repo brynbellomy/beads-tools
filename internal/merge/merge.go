@@ -450,8 +450,9 @@ func timeField(o *beadsfile.Object, key string) (time.Time, bool) {
 	return t, err == nil
 }
 
-// mergeSetField merges an array field as a set: an element survives when both
-// sides have it or one side added it, and goes when either side removed it.
+// mergeSetField merges an array field as a multiset. An element present in base
+// survives when both sides keep it; a side's additions survive, but a copy both
+// sides made is kept once.
 func mergeSetField(key string, b, o, t json.RawMessage) (json.RawMessage, error) {
 	if bytes.Equal(o, t) || bytes.Equal(t, b) {
 		return o, nil
@@ -481,40 +482,33 @@ func mergeSetField(key string, b, o, t json.RawMessage) (json.RawMessage, error)
 	inBase := keyCount(bs, identity)
 	inOurs := keyCount(ous, identity)
 	inTheirs := keyCount(ts, identity)
-	// keysKept is how many entries of an identity survive both sides' edits: an
-	// entry theirs dropped is gone, and an entry we dropped is gone, while an
-	// entry both kept stays.
-	keysKept := map[string]int{}
-	for k := range inBase {
-		if inTheirs[k] == 0 || inOurs[k] == 0 {
-			continue
+	// Keep each base copy when both sides retain it; each side's excess over
+	// base is an independent addition. The base copy must not count as an
+	// addition when both sides increased the original multiplicity.
+	target := map[string]int{}
+	for k, n := range inBase {
+		target[k] = min(inOurs[k], inTheirs[k]) + max(0, inOurs[k]-n) + max(0, inTheirs[k]-n) - min(max(0, inOurs[k]-n), max(0, inTheirs[k]-n))
+	}
+	for k, n := range inOurs {
+		if inBase[k] == 0 {
+			target[k] = max(n, inTheirs[k])
 		}
-		keysKept[k] = max(inTheirs[k], inOurs[k])
+	}
+	for k, n := range inTheirs {
+		if inBase[k] == 0 {
+			target[k] = max(inOurs[k], n)
+		}
 	}
 	var out []*beadsfile.Object
 	kept := map[string]int{}
-	keep := func(e *beadsfile.Object, limit int) {
-		k := identity(e)
-		if kept[k] >= limit {
-			return
+	for _, cs := range [][]*beadsfile.Object{ous, ts} {
+		for _, e := range cs {
+			k := identity(e)
+			if kept[k] < target[k] {
+				kept[k]++
+				out = append(out, e)
+			}
 		}
-		kept[k]++
-		out = append(out, e)
-	}
-	for _, e := range ous {
-		k := identity(e)
-		// An entry theirs still holds is one this side keeps; one theirs dropped
-		// is gone only if it is gone from ours too, so a removal by either side
-		// stands and a re-addition by ours survives.
-		limit := keysKept[k]
-		if inBase[k] == 0 {
-			limit = inOurs[k]
-		}
-		keep(e, limit)
-	}
-	for _, e := range ts {
-		k := identity(e)
-		keep(e, max(inOurs[k], inTheirs[k], inBase[k]))
 	}
 	if key == "comments" {
 		sort.SliceStable(out, func(i, j int) bool {
@@ -587,9 +581,11 @@ func keyCount(objs []*beadsfile.Object, identity func(*beadsfile.Object) string)
 	return m
 }
 
-// commentIdentity names a comment by what was said, by whom, and when — not by
-// its ID, which br assigns from a per-database counter.
-func commentIdentity(c *beadsfile.Object) string { return beadsfile.IdentityOf(c).String() }
+// commentIdentity uses the same canonical comment identity as the guard and
+// ID assignment. The issue ID is supplied by the containing issue here.
+func commentIdentity(c *beadsfile.Object) string {
+	return beadsfile.NewCommentKey("", c).CommentIdentity.String()
+}
 
 func dependencyIdentity(d *beadsfile.Object) string {
 	return string(d.Raw("depends_on_id")) + "\x00" + string(d.Raw("type"))
@@ -730,14 +726,24 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 			return errors.With(err, "reading comments").Set("id", iss.ID).Err()
 		}
 		parsed[i] = cs
-		for j, key := range beadsfile.CommentKeys(iss.ID, cs) {
-			id, ok := beadsfile.CommentID(cs[j])
+		occurrences := map[beadsfile.CommentKey]int{}
+		for j, c := range cs {
+			key := beadsfile.NewCommentKey(iss.ID, c)
+			occurrence := occurrences[key]
+			occurrences[key]++
+			id, ok := beadsfile.CommentID(c)
 			if !ok {
 				continue
 			}
-			bid, inBase := baseIDs[key]
-			oid, inOurs := oursIDs[key]
-			tid, inTheirs := theirsIDs[key]
+			pick := func(ids []int64) (int64, bool) {
+				if len(ids) == 0 {
+					return 0, false
+				}
+				return ids[min(occurrence, len(ids)-1)], true
+			}
+			bid, inBase := pick(baseIDs[key])
+			oid, inOurs := pick(oursIDs[key])
+			tid, inTheirs := pick(theirsIDs[key])
 			want := id
 			switch {
 			case inBase && inOurs && inTheirs && oid == bid:
@@ -755,12 +761,11 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 				rank = rankKept
 			}
 			var alts []int64
-			for _, alt := range []struct {
-				id int64
-				ok bool
-			}{{oid, inOurs}, {bid, inBase}, {tid, inTheirs}} {
-				if alt.ok && alt.id != want && !slices.Contains(alts, alt.id) {
-					alts = append(alts, alt.id)
+			for _, ids := range [][]int64{oursIDs[key], baseIDs[key], theirsIDs[key]} {
+				for _, alt := range ids {
+					if alt != want && !slices.Contains(alts, alt) {
+						alts = append(alts, alt)
+					}
 				}
 			}
 			slots = append(slots, commentSlot{issue: i, obj: cs[j], want: want, alts: alts, rank: rank})
@@ -809,7 +814,7 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 	return nil
 }
 
-// commentIDs maps each comment in f to its id, and returns the largest id.
-func commentIDs(f *beadsfile.File) (map[beadsfile.CommentKey]int64, int64, error) {
+// commentIDs groups each comment's IDs by identity and returns the largest ID.
+func commentIDs(f *beadsfile.File) (map[beadsfile.CommentKey][]int64, int64, error) {
 	return f.CommentIDs()
 }

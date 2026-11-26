@@ -53,6 +53,23 @@ func TestCheck_ParsesEachBlobOnce(t *testing.T) {
 		"each distinct issues blob is parsed once, however many commits and parents point at it")
 }
 
+func TestFilesAt_ReusesTheDecodedCommentIndexForASharedBlob(t *testing.T) {
+	r := testrepo.New(t, testrepo.NewRemote(t))
+	r.Write(".beads/issues.jsonl", `{"id":"t-a","comments":[{"id":1,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}]}`+"\n")
+	r.Commit("beads: one comment")
+	r.Write("work.txt", "one")
+	first := r.Commit("work: one")
+	r.Write("work.txt", "two")
+	second := r.Commit("work: two")
+
+	cache := newFilesAt(gitx.Repo{Dir: r.Dir})
+	a, err := cache.commentIndex(context.Background(), first)
+	require.NoError(t, err)
+	b, err := cache.commentIndex(context.Background(), second)
+	require.NoError(t, err)
+	require.Same(t, a, b, "revisions sharing a blob also share its decoded comments")
+}
+
 // oversized writes an issues file of beads comments into dir and returns its size.
 func oversized(t *testing.T, dir string, beads int) int {
 	t.Helper()

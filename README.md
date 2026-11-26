@@ -55,6 +55,9 @@ issue by issue, field by field:
 - `comments`, `labels` and `dependencies` merge as sets: an element survives
   when both sides have it or one side added it, and goes when either side
   removed it. Comments are identified by author, time and text, not by ID.
+  When several comments have the same identity, a deletion reduces that
+  identity's count. If ours deletes one of two copies while theirs adds a third,
+  both the surviving original and theirs' addition remain.
 - `status`, `closed_at` and `close_reason` resolve together, so a status never
   comes from one side and its close reason from the other.
 - When both sides change the same field to different values, the side whose
@@ -66,8 +69,9 @@ issue by issue, field by field:
 - Comment IDs stay unique across the whole file, as br requires. A comment
   is matched across sides within its own issue, since one note posted on
   several issues in the same second has the same author, time and text on
-  each; identical comments within one issue are matched in file order. Each
-  comment's ID merges three-way: the side that changed it from base wins,
+  each; identical comments within one issue are interchangeable, and their IDs
+  are assigned from the candidates in file order. Each comment's ID merges
+  three-way: the side that changed it from base wins,
   and ours wins when both did. IDs are then claimed in order: comments that
   carry base's ID for them first, then comments base or ours already had,
   then comments only theirs added. A comment whose ID a different comment
@@ -137,10 +141,12 @@ them carries which ID is not observable. The ID is not part of its identity: br
 assigns IDs from a counter kept in one database, so two checkouts mint the same
 "next" number, and a worktree whose database is stale can fold a pulled comment
 into its own counter and give it a new ID on the next flush. That renumbering
-makes the comment a different comment to anything that recorded it by ID. br
-0.2.15 flushed such a renumbering silently, and later versions refuse the
-flush. The hook refuses the commit that would carry it either way, so it does
-not depend on which br wrote the file.
+makes the comment a different comment to anything that recorded it by ID.
+Reproductions with br 0.2.15 flushed silently, deleting a main comment and
+renumbering a merged comment ID; br 0.7.6 refused the flush with exit 7,
+"Refusing a no-op flush because the JSONL changed since its last certified sync".
+The hook refuses the commit that would carry it either way, so it does not
+depend on which br wrote the file.
 
 ## Dependency cycles
 

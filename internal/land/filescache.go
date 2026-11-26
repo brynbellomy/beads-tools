@@ -15,19 +15,24 @@ import (
 // package's own tests, so nothing outside can depend on it.
 var parseCount atomic.Int64
 
+// cachedFile is one parsed issues blob and its decoded comment index.
+type cachedFile struct {
+	file  *beadsfile.File
+	index *beadsfile.CommentIndex
+}
+
 // filesAt is the issues file as of a revision, parsed once per blob.
 //
 // A range check visits a commit's file and each parent's file, and neighbouring
-// commits share most of those blobs: a 100-commit branch read the same 7 MB file
-// about 100 times. Memoizing by blob SHA makes the work proportional to the blobs
-// the range actually touched. A rev with no issues file is remembered as absent.
+// commits share most of those blobs. Memoizing by blob SHA makes work proportional
+// to blobs the range touched rather than commits. A rev with no file is absent.
 //
-// The *beadsfile.File values returned are shared and must be treated as read-only;
-// a file decodes its comment index on first use and never mutates it afterwards.
+// The *beadsfile.File values returned are shared and read-only. Each blob's
+// decoded comment index is cached beside its parsed file.
 type filesAt struct {
 	repo   gitx.Repo
-	byRev  map[string]*beadsfile.File
-	byBlob map[string]*beadsfile.File
+	byRev  map[string]*cachedFile
+	byBlob map[string]*cachedFile
 	absent map[string]bool
 }
 
@@ -35,8 +40,8 @@ type filesAt struct {
 func newFilesAt(repo gitx.Repo) *filesAt {
 	return &filesAt{
 		repo:   repo,
-		byRev:  map[string]*beadsfile.File{},
-		byBlob: map[string]*beadsfile.File{},
+		byRev:  map[string]*cachedFile{},
+		byBlob: map[string]*cachedFile{},
 		absent: map[string]bool{},
 	}
 }
@@ -44,22 +49,40 @@ func newFilesAt(repo gitx.Repo) *filesAt {
 // at returns the issues file as of rev, or nil when rev holds none. The returned
 // file is shared and read-only.
 func (c *filesAt) at(ctx context.Context, rev string) (*beadsfile.File, error) {
-	if f, ok := c.byRev[rev]; ok {
-		return f, nil
+	entry, err := c.entry(ctx, rev)
+	if err != nil || entry == nil {
+		return nil, err
+	}
+	return entry.file, nil
+}
+
+// commentIndex returns the decoded comment index of the blob at rev. It shares
+// the cache's single blob lookup with at.
+func (c *filesAt) commentIndex(ctx context.Context, rev string) (*beadsfile.CommentIndex, error) {
+	entry, err := c.entry(ctx, rev)
+	if err != nil || entry == nil {
+		return nil, err
+	}
+	return entry.index, nil
+}
+
+// entry returns one parsed file and comment index for a revision.
+func (c *filesAt) entry(ctx context.Context, rev string) (*cachedFile, error) {
+	if entry, ok := c.byRev[rev]; ok {
+		return entry, nil
 	}
 	if c.absent[rev] {
 		return nil, nil
 	}
 	blob, err := c.repo.Run(ctx, "rev-parse", rev+":"+beadsfile.Path)
 	if err != nil {
-		// No issues file at that revision, or nothing to resolve it against.
 		c.absent[rev] = true
 		return nil, nil
 	}
 	blob = strings.TrimSpace(blob)
-	if f, ok := c.byBlob[blob]; ok {
-		c.byRev[rev] = f
-		return f, nil
+	if entry, ok := c.byBlob[blob]; ok {
+		c.byRev[rev] = entry
+		return entry, nil
 	}
 	data, ok, err := c.repo.Show(ctx, rev, beadsfile.Path)
 	if err != nil {
@@ -74,9 +97,10 @@ func (c *filesAt) at(ctx context.Context, rev string) (*beadsfile.File, error) {
 	if err != nil {
 		return nil, errors.With(err, "reading issues file").Set("rev", rev).Err()
 	}
-	c.byBlob[blob] = f
-	c.byRev[rev] = f
-	return f, nil
+	entry := &cachedFile{file: f, index: f.CommentIndex()}
+	c.byBlob[blob] = entry
+	c.byRev[rev] = entry
+	return entry, nil
 }
 
 // many returns the issues file at each of revs, nil for a rev that holds none.
