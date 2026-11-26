@@ -216,22 +216,20 @@ func newest(a, b *beadsfile.Issue) (string, bool) {
 
 // stampPast returns the timestamp one unit past s, where the unit is the
 // smallest s's own fractional precision can express: a second when it has no
-// fraction, otherwise the last digit's place. The fractional width and the zone
-// spelling are carried over unchanged, so the result has the shape br wrote and
-// br parses it back.
+// fraction, otherwise the last digit's place. The fractional width is kept and
+// the zone is spliced back exactly as s spelled it, so the result has the shape
+// br wrote and br parses it back.
 func stampPast(s string) (string, bool) {
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
 		return "", false
 	}
-	digits := 0
-	if i := strings.IndexByte(s, '.'); i >= 0 {
-		for digits < len(s)-i-1 && s[i+1+digits] >= '0' && s[i+1+digits] <= '9' {
-			digits++
-		}
+	m := zoneSuffix.FindStringSubmatchIndex(s)
+	if m == nil {
+		return "", false
 	}
-	zoneAt := len(s) - len(t.Format("Z07:00"))
-	if digits > 9 || zoneAt < 1 {
+	digits := fractionDigits(s[:m[0]])
+	if digits > 9 {
 		return "", false
 	}
 	step := time.Second
@@ -242,7 +240,21 @@ func stampPast(s string) (string, bool) {
 	if digits > 0 {
 		layout += "." + strings.Repeat("0", digits)
 	}
-	return t.Add(step).Format(layout) + s[zoneAt:], true
+	return t.Add(step).Format(layout) + s[m[0]:], true
+}
+
+// zoneSuffix matches the zone at the end of an RFC 3339 timestamp. It is read
+// from the text rather than from a reformatted time, because Format prints a
+// zero offset as Z and would shorten the tail of a timestamp written +00:00.
+var zoneSuffix = regexp.MustCompile(`(Z|[+-][0-9]{2}:[0-9]{2})$`)
+
+// fractionDigits returns how many fractional-second digits before the zone hold.
+func fractionDigits(s string) int {
+	i := strings.IndexByte(s, '.')
+	if i < 0 {
+		return 0
+	}
+	return len(s) - i - 1
 }
 
 func mergeOne(b, o, t *beadsfile.Issue, rep *Report) (*beadsfile.Issue, error) {

@@ -44,6 +44,11 @@ func renumberRepo(t *testing.T, before, after string) (*testrepo.Repo, string) {
 	return r, id
 }
 
+// msg builds a commit message that names one bead, for the hook to check.
+func msg(subject, id string) string {
+	return subject + "\n\nRefs: " + id + "\n"
+}
+
 func TestCommitMsg_RefusesRenumberingAnExistingComment(t *testing.T) {
 	// A stale store folded the pulled comment into its own counter and moved it.
 	r, id := renumberRepo(t, commentRow("t-a", "4 from main"), commentRow("t-a", "5 from main"))
@@ -72,19 +77,24 @@ func TestCommitMsg_CommentsOnDifferentBeadsAreJudgedSeparately(t *testing.T) {
 	require.NotContains(t, err.Error(), "on t-b", "t-b's comment did not move")
 }
 
-// Two byte-identical comments on one bead are told apart by their order, so a
-// commit that keeps the order renumbers nothing.
-func TestCommitMsg_IdenticalCommentsWithinOneBeadMustKeepTheirIDs(t *testing.T) {
+// Two byte-identical comments on one bead are interchangeable, so reordering
+// them renumbers nothing and the hook lets it through. An id given up is still
+// refused, which the neighbouring tests cover.
+func TestCommitMsg_IdenticalCommentsWithinOneBeadMayBeReordered(t *testing.T) {
 	same := func(a, b string) string {
 		return `{"id":"t-a","title":"a","comments":[{"id":` + a + `,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"},{"id":` + b + `,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}]}`
 	}
 	r, id := renumberRepo(t, same("7", "8"), same("7", "8"))
-	require.NoError(t, check(t, r, "beads: nothing moved\n\nRefs: "+id+"\n"))
+	require.NoError(t, check(t, r, msg("beads: nothing moved", id)))
 
 	r, id = renumberRepo(t, same("7", "8"), same("8", "7"))
-	err := check(t, r, "beads: swapped\n\nRefs: "+id+"\n")
+	require.NoError(t, check(t, r, msg("beads: reordered", id)),
+		"the same two ids stay on the same two identical comments")
+
+	gaveOneUp := `{"id":"t-a","title":"a","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}]}`
+	r, id = renumberRepo(t, same("7", "8"), gaveOneUp)
+	err := check(t, r, msg("beads: dropped one", id))
 	require.ErrorContains(t, err, "renumbers comments that already existed")
-	require.ErrorContains(t, err, "(occurrence 2): id 8 -> 7")
 }
 
 // A merge commit may inherit an id either parent holds for the comment: ours has

@@ -2,6 +2,7 @@ package merge_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -165,4 +166,40 @@ func TestMerge_AddedIssueIsNotStamped(t *testing.T) {
 
 	require.Contains(t, out, added+"\n")
 	require.Empty(t, rep.Stamps)
+}
+
+// A UTC timestamp written with an explicit +00:00 offset is valid RFC 3339 and br
+// writes some of them. The stamp must keep that spelling and stay RFC 3339, or
+// the row cannot be parsed back and can never be stamped again.
+func TestMerge_StampKeepsAZeroOffsetSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name, was, want string
+	}{
+		{"plus zero, whole seconds", "2026-01-02T00:00:00+00:00", "2026-01-02T00:00:01+00:00"},
+		{"minus zero, whole seconds", "2026-01-02T00:00:00-00:00", "2026-01-02T00:00:01-00:00"},
+		{"plus zero, fractional", "2026-01-02T00:00:00.123456+00:00", "2026-01-02T00:00:00.123457+00:00"},
+		{"minus zero, fractional", "2026-01-02T00:00:00.123456-00:00", "2026-01-02T00:00:00.123457-00:00"},
+		{"a non-zero offset still works", "2026-01-02T00:00:00+05:30", "2026-01-02T00:00:01+05:30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := file(t, `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z"}`)
+			ours := file(t, `{"id":"t-a","title":"a","updated_at":"`+tc.was+`","comments":[{"id":1,"issue_id":"t-a","author":"b","text":"x","created_at":"2026-01-02T00:00:00Z"}]}`)
+			theirs := file(t, `{"id":"t-a","title":"a2","updated_at":"`+tc.was+`"}`)
+
+			out, _ := run(t, base, ours, theirs)
+
+			got := issue(t, out, "t-a")["updated_at"]
+			require.Equal(t, tc.want, got)
+			require.NotNil(t, mustParse(t, got.(string)), "the stamp must stay RFC 3339, or br cannot read the row back")
+			require.True(t, mustParse(t, got.(string)).After(mustParse(t, tc.was)), "and it must move forward")
+		})
+	}
+}
+
+// mustParse parses an RFC 3339 timestamp, failing the test when it is not one.
+func mustParse(t *testing.T, s string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, s)
+	require.NoError(t, err, "%q is not RFC 3339", s)
+	return parsed
 }
