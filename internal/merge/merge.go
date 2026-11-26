@@ -48,12 +48,20 @@ type Renumber struct {
 	Old, New int64
 }
 
+// Stamp is a merged row whose updated_at the merge moved past both parents, so
+// that br's next import prefers the file over its database.
+type Stamp struct {
+	ID       string
+	Was, Now string
+}
+
 // Report describes every decision the merge made that a person might want to
 // check.
 type Report struct {
 	Conflicts []Conflict
 	Renames   []Rename
 	Renumbers []Renumber
+	Stamps    []Stamp
 }
 
 // Clean reports whether the merge needed no judgement calls on field values.
@@ -70,6 +78,9 @@ func (r *Report) String() string {
 	}
 	for _, rn := range r.Renumbers {
 		fmt.Fprintf(&b, "comment on %s renumbered %d -> %d (id collided with another comment)\n", rn.IssueID, rn.Old, rn.New)
+	}
+	if n := len(r.Stamps); n > 0 {
+		fmt.Fprintf(&b, "stamped %d merged row(s) with a newer updated_at, so br's next import keeps them\n", n)
 	}
 	return b.String()
 }
@@ -112,6 +123,9 @@ func Merge(base, ours, theirs *beadsfile.File) (*beadsfile.File, *Report, error)
 	if err := assignCommentIDs(base, ours, theirs, out, rep); err != nil {
 		return nil, nil, err
 	}
+	if err := stampMergedRows(ours, theirs, out, rep); err != nil {
+		return nil, nil, err
+	}
 	f, err := beadsfile.New(out)
 	if err != nil {
 		return nil, nil, err
@@ -124,6 +138,111 @@ func Merge(base, ours, theirs *beadsfile.File) (*beadsfile.File, *Report, error)
 		return nil, nil, errors.WithNew("merge produced a duplicate comment id").Set("duplicate", dups[0].String()).Err()
 	}
 	return f, rep, nil
+}
+
+// stampMergedRows moves the updated_at of a merged row past both parents when
+// br would otherwise prefer the row in its database over the one written here.
+//
+// br compares the two by updated_at and keeps the database's row on a tie, and
+// the database a worktree holds is the row it had before the merge: ours. A
+// merged row whose updated_at is not strictly newer than ours therefore comes
+// undone at the next import, silently restoring the fields only the other side
+// had changed. A row that is already strictly newer needs no stamp, and gets
+// none, so a line only the other side changed keeps its exact bytes.
+//
+// The new value comes from the inputs alone, never from the clock, so the same
+// three files always merge to the same bytes.
+func stampMergedRows(ours, theirs *beadsfile.File, out []*beadsfile.Issue, rep *Report) error {
+	for i, iss := range out {
+		before := ours.Get(iss.ID)
+		if before == nil || before.Obj.Equal(iss.Obj) {
+			continue
+		}
+		was, ok := iss.Obj.String("updated_at")
+		if !ok {
+			continue
+		}
+		oursAt, ok := timeField(before.Obj, "updated_at")
+		if !ok {
+			continue
+		}
+		if merged, ok := timeField(iss.Obj, "updated_at"); ok && merged.After(oursAt) {
+			continue
+		}
+		latest, ok := newest(before, theirs.Get(iss.ID))
+		if !ok {
+			continue
+		}
+		stamped, ok := stampPast(latest)
+		if !ok {
+			continue
+		}
+		obj := iss.Obj.Clone()
+		obj.SetString("updated_at", stamped)
+		ni, err := beadsfile.NewIssue(obj)
+		if err != nil {
+			return err
+		}
+		out[i] = ni
+		rep.Stamps = append(rep.Stamps, Stamp{ID: iss.ID, Was: was, Now: stamped})
+	}
+	return nil
+}
+
+// newest returns the later updated_at of a and b, in the shape it was written,
+// and whether either has one.
+func newest(a, b *beadsfile.Issue) (string, bool) {
+	var best string
+	var bestAt time.Time
+	var found bool
+	for _, iss := range []*beadsfile.Issue{a, b} {
+		if iss == nil {
+			continue
+		}
+		s, ok := iss.Obj.String("updated_at")
+		if !ok {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			continue
+		}
+		if !found || t.After(bestAt) {
+			best, bestAt, found = s, t, true
+		}
+	}
+	return best, found
+}
+
+// stampPast returns the timestamp one unit past s, where the unit is the
+// smallest s's own fractional precision can express: a second when it has no
+// fraction, otherwise the last digit's place. The fractional width and the zone
+// spelling are carried over unchanged, so the result has the shape br wrote and
+// br parses it back.
+func stampPast(s string) (string, bool) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return "", false
+	}
+	digits := 0
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		for digits < len(s)-i-1 && s[i+1+digits] >= '0' && s[i+1+digits] <= '9' {
+			digits++
+		}
+	}
+	zoneAt := len(s) - len(t.Format("Z07:00"))
+	if digits > 9 || zoneAt < 1 {
+		return "", false
+	}
+	step := time.Second
+	for range digits {
+		step /= 10
+	}
+	layout := "2006-01-02T15:04:05"
+	if digits > 0 {
+		layout += "." + strings.Repeat("0", digits)
+	}
+	return t.Add(step).Format(layout) + s[zoneAt:], true
 }
 
 func mergeOne(b, o, t *beadsfile.Issue, rep *Report) (*beadsfile.Issue, error) {

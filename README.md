@@ -75,6 +75,15 @@ issue by issue, field by field:
   is free, and otherwise the next ID above every ID in base, ours and
   theirs; that renumbering is printed. The same rule repairs duplicate IDs
   an input already carries.
+- A merged issue that differs from ours gets an `updated_at` one unit past the
+  newest one either side gives it, keeping the precision the timestamp was
+  written with. br settles between the issues file and its own database by
+  `updated_at` and keeps the database's row on a tie, and a checkout's database
+  holds the row it had before the merge, so without this a merged row that lost
+  that tie would be silently undone by the next import. The value is derived
+  from the two sides alone, never from the clock, so the same three files always
+  merge to the same bytes, and a row that is already strictly newer is left
+  untouched.
 - Lines the merge did not change keep their exact bytes. Output is sorted by
   ID, as br exports it.
 
