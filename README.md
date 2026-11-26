@@ -75,6 +75,15 @@ issue by issue, field by field:
   is free, and otherwise the next ID above every ID in base, ours and
   theirs; that renumbering is printed. The same rule repairs duplicate IDs
   an input already carries.
+- A merged issue that differs from ours gets an `updated_at` one unit past the
+  newest one either side gives it, keeping the precision the timestamp was
+  written with. br settles between the issues file and its own database by
+  `updated_at` and keeps the database's row on a tie, and a checkout's database
+  holds the row it had before the merge, so without this a merged row that lost
+  that tie would be silently undone by the next import. The value is derived
+  from the two sides alone, never from the clock, so the same three files always
+  merge to the same bytes, and a row that is already strictly newer is left
+  untouched.
 - Lines the merge did not change keep their exact bytes. Output is sorted by
   ID, as br exports it.
 
@@ -112,9 +121,20 @@ merges included, is rejected when the staged file holds a comment ID more
 than once, since br refuses to import such a file, unless a parent of the
 commit (HEAD, or the branch being merged) already holds that same ID on the
 same issues: merging a branch that carries duplicates is not blocked. It is
-also rejected when the staged file adds a [dependency
-cycle](#dependency-cycles) that no parent holds. Set `BEADS_TOOLS_SKIP=1` to
-skip the checks for one commit.
+rejected when the staged file gives an existing comment an ID none of its
+parents holds for it, since an ID a parent holds for the comment is what a
+merge inherits, and a new comment has no such ID to hold. It is also rejected
+when the staged file adds a [dependency cycle](#dependency-cycles) that no
+parent holds. Set `BEADS_TOOLS_SKIP=1` to skip the checks for one commit.
+
+A comment is identified by the issue, `created_at`, `author` and text, plus
+which of several identical comments on one issue it is, in file order. Its ID
+is not part of its identity: br assigns IDs from a counter kept in one
+database, so two checkouts mint the same "next" number, and a worktree whose
+database is stale can fold a pulled comment into its own counter and give it
+a new ID on the next flush. That renumbering makes the comment a different
+comment to anything that recorded it by ID. br 0.7.6 refuses such a flush;
+the hook refuses the commit that would carry it.
 
 ## Dependency cycles
 
@@ -146,8 +166,8 @@ does not contain the base, it merges the base into the head, with this
 tool's merge driver handling the issues file whatever the repository's own
 git config says. It then applies the landing rules to that head (valid
 trailers, no duplicate comment ID the base does not hold on the same issues,
-no [dependency cycle](#dependency-cycles) the base does not hold), adds one
-commit that closes the issues the PR's `Closes:` trailers name, pushes the
+no renumbered comment or [dependency cycle](#dependency-cycles) the base does
+not hold), adds one commit that closes the issues the PR's `Closes:` trailers name, pushes the
 result to the PR's branch (a plain push, which fails if anyone pushed
 meanwhile) and merges the PR with `gh pr merge --match-head-commit`. Right
 before each merge call it reads the base branch's tip on the remote again,
@@ -195,7 +215,8 @@ references its epic. An issue already closed on the branch, or closed by a
 `Closes:` trailer, needs no decision.
 
 `land pr` applies the commit-msg hook's rules to every commit in the PR, so a
-clone without the hook cannot land unlinked work: it refuses a PR with any
+clone without the hook cannot land unlinked work or a renumbering the hook
+would have refused: it refuses a PR with any
 commit whose trailers name an issue that does not exist and, when
 `beadstools.requireTrailers` is on, any commit that names no issue (merges,
 reverts and `.beads/`-only commits are exempt). It lists the offending
@@ -215,10 +236,11 @@ beads-tools check --base origin/main --head HEAD    # explicit range
 ```
 
 It reads the issues file at `--head`, prints each offending commit, each
-duplicate comment ID that file holds and `--base` does not, and each
-[dependency cycle](#dependency-cycles) the range adds, and exits 1 when any
-commit fails the rules, any such duplicate is found or any cycle is added (2
-on errors). A duplicate `--base` already holds prints a warning and does not
+duplicate comment ID that file holds and `--base` does not, each comment a
+commit in the range renumbers, and each [dependency
+cycle](#dependency-cycles) the range adds, and exits 1 when any commit fails
+the rules, any such duplicate is found, any comment is renumbered or any cycle
+is added (2 on errors). A duplicate `--base` already holds prints a warning and does not
 fail the check.
 `--require-trailers=BOOL` overrides `beadstools.requireTrailers` for one
 run. On a GitHub pull request

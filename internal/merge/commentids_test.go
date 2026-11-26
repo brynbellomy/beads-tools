@@ -1,9 +1,12 @@
 package merge_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/brynbellomy/beads-tools/internal/merge"
 )
 
 // Found on real data: one br command posted the same comment on several issues
@@ -22,6 +25,8 @@ func TestMerge_IdenticalCommentsOnDifferentIssuesKeepTheirIDs(t *testing.T) {
 
 // Found on real data: br on main renumbered comments on issues the branch never
 // touched. Merging main into the branch must take main's ids, not revert them.
+// The row moved, so it also carries a newer updated_at: br's import prefers its
+// database's row on a tie, and the database holds the old id.
 func TestMerge_OneSidedCommentRenumberIsKept(t *testing.T) {
 	base := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":1,"issue_id":"t-a","author":"x","text":"old","created_at":"2026-01-01T00:00:00Z"}]}`
 	theirs := `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[{"id":61,"issue_id":"t-a","author":"x","text":"old","created_at":"2026-01-01T00:00:00Z"}]}`
@@ -29,6 +34,8 @@ func TestMerge_OneSidedCommentRenumberIsKept(t *testing.T) {
 
 	out, rep := run(t, file(t, base), file(t, base, ours2), file(t, theirs))
 
-	require.Equal(t, theirs+"\n"+ours2+"\n", out)
+	stamped := strings.Replace(theirs, `"updated_at":"2026-01-01T00:00:00Z"`, `"updated_at":"2026-01-01T00:00:01Z"`, 1)
+	require.Equal(t, stamped+"\n"+ours2+"\n", out)
 	require.Empty(t, rep.Renumbers)
+	require.Equal(t, []merge.Stamp{{ID: "t-a", Was: "2026-01-01T00:00:00Z", Now: "2026-01-01T00:00:01Z"}}, rep.Stamps)
 }

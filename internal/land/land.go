@@ -404,10 +404,10 @@ func (l *Lander) PR(ctx context.Context, number int, opts Options) error {
 }
 
 // catchUpPR merges base into the worktree's head through the merge driver and
-// applies the landing rules to the result: no duplicate comment id or
-// dependency cycle the base does not hold, and every commit since base names
-// valid issues. It returns the head, its commits since base and its issues
-// file.
+// applies the landing rules to the result: no duplicate comment id, renumbered
+// comment or dependency cycle the base does not hold, and every commit since
+// base names valid issues. It returns the head, its commits since base and its
+// issues file.
 func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string, opts Options) (string, []trailers.Commit, *beadsfile.File, error) {
 	if err := w.catchUp(ctx, base, l.MergeDriver, "Merge "+base+" into "+pr.HeadRefName); err != nil {
 		return "", nil, nil, err
@@ -428,6 +428,9 @@ func (l *Lander) catchUpPR(ctx context.Context, w *worktree, pr PR, base string,
 		return "", nil, nil, err
 	}
 	if err := l.refuseNewCycles(ctx, base, sha, issues, pr.HeadRefName); err != nil {
+		return "", nil, nil, err
+	}
+	if err := l.refuseRenumberedComments(ctx, commits, pr.HeadRefName); err != nil {
 		return "", nil, nil, err
 	}
 	unlinked, err := FindUnlinked(ctx, l.Repo, commits, issues, !opts.TrailersOptional)
@@ -563,6 +566,22 @@ func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beads
 		"br refuses to import it. Renumber all but one comment for each id on the branch, or, if a text merge made "+
 		"them, merge the base branch into the branch locally with the beads-tools merge driver installed; push, "+
 		"and land again", where, len(added), base)).Err()
+}
+
+// refuseRenumberedComments fails when a commit since base moves an existing
+// comment to an id its own parents do not hold for it; an id either side of a
+// merge holds lands. It checks every commit in the range, not only the head, so
+// a branch whose middle commit renumbered a comment cannot land.
+func (l *Lander) refuseRenumberedComments(ctx context.Context, commits []trailers.Commit, where string) error {
+	moved, err := FindRenumbered(ctx, l.Repo, commits)
+	if err != nil || len(moved) == 0 {
+		return err
+	}
+	for _, r := range moved {
+		l.printf("refuse %s %s: renumbers %s\n", short(r.Commit.SHA), r.Commit.Subject, r.RenumberedComment)
+	}
+	return errors.WithNew(fmt.Sprintf("%d comment(s) on %s changed id on the way; a comment keeps the id it had. "+
+		"Put each back, push, and land again", len(moved), where)).Err()
 }
 
 // refuseNewCycles fails when issues, the file at head, holds a dependency

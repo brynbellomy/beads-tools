@@ -23,8 +23,9 @@ const SkipEnv = "BEADS_TOOLS_SKIP"
 var skippedSubjects = []string{"Merge ", "fixup!", "squash!", "amend!", "Revert \""}
 
 // CommitMsg checks the commit message in msgPath. A commit that changes the
-// issues file, merges included, must not add a duplicate comment id or a
-// dependency cycle that its parents do not already hold. Every
+// issues file, merges included, must not add a duplicate comment id, renumber an
+// existing comment, or add a dependency cycle that its parents do not already
+// hold. Every
 // ID a Closes or Refs trailer names must exist in the working tree's issues
 // file, so an issue created for this commit counts. When
 // beadstools.requireTrailers is on (the default), a commit off the main branch
@@ -162,6 +163,9 @@ func checkStagedIssues(ctx context.Context, repo gitx.Repo) error {
 	if err := checkCommentIDs(staged, parents); err != nil {
 		return err
 	}
+	if err := checkCommentRenumbers(staged, parents); err != nil {
+		return err
+	}
 	return checkCycles(staged, parents)
 }
 
@@ -178,6 +182,23 @@ func checkCommentIDs(staged *beadsfile.File, parents []*beadsfile.File) error {
 	}
 	return errors.WithNew(fmt.Sprintf("the staged %s adds duplicate comment ids, which br refuses to import:\n%s\n"+
 		"Renumber all but one comment for each id.", beadsfile.Path, strings.Join(lines, "\n"))).Err()
+}
+
+// checkCommentRenumbers fails when staged moves an existing comment to an id
+// none of the parents holds for it, which makes that comment a different
+// comment to everything that keys on ids. An id any parent holds for the
+// comment passes, so a merge inherits the renumbering either side carries.
+func checkCommentRenumbers(staged *beadsfile.File, parents []*beadsfile.File) error {
+	moved, err := beadsfile.NewRenumberedComments(staged, parents...)
+	if err != nil || len(moved) == 0 {
+		return err
+	}
+	lines := make([]string, len(moved))
+	for i, m := range moved {
+		lines[i] = "    " + m.String()
+	}
+	return errors.WithNew(fmt.Sprintf("the staged %s renumbers comments that already existed:\n%s\n"+
+		"Leave each comment at the id it had; br numbers a new comment itself.", beadsfile.Path, strings.Join(lines, "\n"))).Err()
 }
 
 // checkCycles fails when staged holds a dependency cycle, of any edge type,
