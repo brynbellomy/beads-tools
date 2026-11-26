@@ -115,8 +115,12 @@ are case-insensitive.
 
 The commit-msg hook rejects IDs that do not exist (an issue created in the
 same commit counts). Off the main branch it also requires at least one
-trailer, except for commits that change only `.beads/`, merges, and
-`fixup!`/`squash!`/`amend!` commits. A commit that changes the issues file,
+trailer, except for commits that change only `.beads/`, merges, reverts, and
+`fixup!`/`squash!`/`amend!` commits. The trailer rules are the only ones those
+commits are excused from: a merge or a revert that changes the issues file is
+still checked for duplicate comment IDs, renumbered comment IDs and added
+dependency cycles, because a merge or a revert is exactly how an old file state
+comes back. A commit that changes the issues file,
 merges included, is rejected when the staged file holds a comment ID more
 than once, since br refuses to import such a file, unless a parent of the
 commit (HEAD, or the branch being merged) already holds that same ID on the
@@ -133,8 +137,10 @@ is not part of its identity: br assigns IDs from a counter kept in one
 database, so two checkouts mint the same "next" number, and a worktree whose
 database is stale can fold a pulled comment into its own counter and give it
 a new ID on the next flush. That renumbering makes the comment a different
-comment to anything that recorded it by ID. br 0.7.6 refuses such a flush;
-the hook refuses the commit that would carry it.
+comment to anything that recorded it by ID. br refuses such a flush in 0.7.6,
+where it was reproduced, and flushed silently in 0.2.15, where it was also
+reproduced; the hook refuses the commit that would carry it, so it holds for
+either version.
 
 ## Dependency cycles
 

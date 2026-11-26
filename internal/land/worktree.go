@@ -106,7 +106,7 @@ func (l *Lander) commitCloses(ctx context.Context, w *worktree, planned []Planne
 	for i, p := range planned {
 		closes[i] = p.Close
 	}
-	files, err := filesAt(ctx, l.Repo, []string{base})
+	files, err := newFilesAt(l.Repo).many(ctx, []string{base})
 	if err != nil {
 		return err
 	}

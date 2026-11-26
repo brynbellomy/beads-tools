@@ -166,10 +166,20 @@ func stampMergedRows(ours, theirs *beadsfile.File, out []*beadsfile.Issue, rep *
 		if !ok {
 			continue
 		}
-		if merged, ok := timeField(iss.Obj, "updated_at"); ok && merged.After(oursAt) {
-			continue
+		theirRow := theirs.Get(iss.ID)
+		// A row the merge took from theirs whole, stamped strictly later than ours,
+		// is already safe and keeps its bytes: a database holding ours is older, and
+		// one holding theirs holds this very row. A row that mixes the two sides is
+		// not, because a checkout that had already imported theirs would hold theirs'
+		// row and win the tie, dropping what ours contributed. Nor is a row theirs
+		// wrote at exactly our own instant, which ties with our database.
+		if merged, ok := timeField(iss.Obj, "updated_at"); ok && theirRow != nil {
+			if theirsAt, ok := timeField(theirRow.Obj, "updated_at"); ok &&
+				merged.Equal(theirsAt) && theirsAt.After(oursAt) && theirRow.Obj.Equal(iss.Obj) {
+				continue
+			}
 		}
-		latest, ok := newest(before, theirs.Get(iss.ID))
+		latest, ok := newest(before, theirRow)
 		if !ok {
 			continue
 		}
@@ -468,21 +478,43 @@ func mergeSetField(key string, b, o, t json.RawMessage) (json.RawMessage, error)
 	if err != nil {
 		return nil, err
 	}
-	inBase := keySet(bs, identity)
-	inOurs := keySet(ous, identity)
-	inTheirs := keySet(ts, identity)
+	inBase := keyCount(bs, identity)
+	inOurs := keyCount(ous, identity)
+	inTheirs := keyCount(ts, identity)
+	// keysKept is how many entries of an identity survive both sides' edits: an
+	// entry theirs dropped is gone, and an entry we dropped is gone, while an
+	// entry both kept stays.
+	keysKept := map[string]int{}
+	for k := range inBase {
+		if inTheirs[k] == 0 || inOurs[k] == 0 {
+			continue
+		}
+		keysKept[k] = max(inTheirs[k], inOurs[k])
+	}
 	var out []*beadsfile.Object
+	kept := map[string]int{}
+	keep := func(e *beadsfile.Object, limit int) {
+		k := identity(e)
+		if kept[k] >= limit {
+			return
+		}
+		kept[k]++
+		out = append(out, e)
+	}
 	for _, e := range ous {
 		k := identity(e)
-		if inTheirs[k] || !inBase[k] {
-			out = append(out, e)
+		// An entry theirs still holds is one this side keeps; one theirs dropped
+		// is gone only if it is gone from ours too, so a removal by either side
+		// stands and a re-addition by ours survives.
+		limit := keysKept[k]
+		if inBase[k] == 0 {
+			limit = inOurs[k]
 		}
+		keep(e, limit)
 	}
 	for _, e := range ts {
 		k := identity(e)
-		if !inOurs[k] && !inBase[k] {
-			out = append(out, e)
-		}
+		keep(e, max(inOurs[k], inTheirs[k], inBase[k]))
 	}
 	if key == "comments" {
 		sort.SliceStable(out, func(i, j int) bool {
@@ -547,10 +579,10 @@ func strSet(xs []string) map[string]bool {
 	return m
 }
 
-func keySet(objs []*beadsfile.Object, identity func(*beadsfile.Object) string) map[string]bool {
-	m := make(map[string]bool, len(objs))
+func keyCount(objs []*beadsfile.Object, identity func(*beadsfile.Object) string) map[string]int {
+	m := make(map[string]int, len(objs))
 	for _, o := range objs {
-		m[identity(o)] = true
+		m[identity(o)]++
 	}
 	return m
 }

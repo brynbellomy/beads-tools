@@ -6,8 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/brynbellomy/go-utils/errors"
-
 	"github.com/brynbellomy/beads-tools/internal/beadsfile"
 	"github.com/brynbellomy/beads-tools/internal/gitx"
 	"github.com/brynbellomy/beads-tools/internal/trailers"
@@ -32,20 +30,17 @@ type Renumbered struct {
 // range, not only the head, so a branch whose middle commit renumbered a
 // comment cannot land.
 func FindRenumbered(ctx context.Context, repo gitx.Repo, commits []trailers.Commit) ([]Renumbered, error) {
+	cache := newFilesAt(repo)
 	var out []Renumbered
 	for _, c := range commits {
-		data, ok, err := repo.Show(ctx, c.SHA, beadsfile.Path)
+		head, err := cache.at(ctx, c.SHA)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if head == nil {
 			continue
 		}
-		head, err := beadsfile.Parse(strings.NewReader(data))
-		if err != nil {
-			return nil, errors.With(err, "reading issues file").Set("rev", c.SHA).Err()
-		}
-		parents, err := filesAt(ctx, repo, c.Parents)
+		parents, err := cache.many(ctx, c.Parents)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +113,7 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	if err != nil {
 		return false, err
 	}
-	baseFiles, err := filesAt(ctx, repo, []string{base})
+	baseFiles, err := newFilesAt(repo).many(ctx, []string{base})
 	if err != nil {
 		return false, err
 	}
@@ -180,7 +175,7 @@ func cyclesAdded(ctx context.Context, repo gitx.Repo, base, head string, issues 
 	if mb, err := repo.Run(ctx, "merge-base", base, head); err == nil {
 		revs = append(revs, strings.TrimSpace(mb))
 	}
-	parents, err := filesAt(ctx, repo, revs)
+	parents, err := newFilesAt(repo).many(ctx, revs)
 	if err != nil {
 		return nil, err
 	}

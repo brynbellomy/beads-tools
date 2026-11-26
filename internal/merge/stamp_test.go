@@ -203,3 +203,23 @@ func mustParse(t *testing.T, s string) time.Time {
 	require.NoError(t, err, "%q is not RFC 3339", s)
 	return parsed
 }
+
+// M6: nothing distinguished "the later parent wins" from "the first parent
+// wins" in newest, because in every other fixture ours was the later one. Here
+// ours is strictly older: the merge keeps our field and takes theirs, so the
+// merged row holds ours' updated_at and is not newer than ours, and the stamp
+// must land past THEIRS, the newer parent. A first-parent-wins newest would
+// stamp past ours instead and the row would lose the tie with the database.
+func TestMerge_StampIsPastTheirsWhenTheirsIsNewer(t *testing.T) {
+	base := file(t, `{"id":"t-a","title":"old","status":"open","updated_at":"2026-01-01T00:00:00Z"}`)
+	ours := file(t, `{"id":"t-a","title":"ours","status":"open","updated_at":"2026-01-02T00:00:00Z"}`)
+	theirs := file(t, `{"id":"t-a","title":"old","status":"closed","closed_at":"2026-01-03T00:00:00Z","close_reason":"done","updated_at":"2026-01-03T00:00:00Z"}`)
+
+	out, rep := run(t, base, ours, theirs)
+
+	m := issue(t, out, "t-a")
+	require.Equal(t, "ours", m["title"], "our field wins")
+	require.Equal(t, "closed", m["status"], "theirs' close group wins")
+	require.Equal(t, "2026-01-03T00:00:01Z", m["updated_at"], "one unit past theirs, the newer parent")
+	require.Equal(t, []merge.Stamp{{ID: "t-a", Was: "2026-01-03T00:00:00Z", Now: "2026-01-03T00:00:01Z"}}, rep.Stamps)
+}

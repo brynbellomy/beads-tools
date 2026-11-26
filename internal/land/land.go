@@ -544,7 +544,7 @@ func pause(ctx context.Context, d time.Duration) error {
 // does not; br refuses to import such a file. A duplicate the base already
 // holds only warns, so a branch is not blocked by one it inherited.
 func (l *Lander) refuseNewDuplicateCommentIDs(ctx context.Context, issues *beadsfile.File, where, base string) error {
-	files, err := filesAt(ctx, l.Repo, []string{base})
+	files, err := newFilesAt(l.Repo).many(ctx, []string{base})
 	if err != nil {
 		return err
 	}
@@ -608,26 +608,6 @@ func issuesAt(ctx context.Context, repo gitx.Repo, rev string) (*beadsfile.File,
 		return nil, errors.WithNew("no issues file at revision").Set("rev", rev, "path", beadsfile.Path).Err()
 	}
 	return beadsfile.Parse(strings.NewReader(data))
-}
-
-// filesAt parses the issues file at each of revs; a rev without one counts as
-// an empty file.
-func filesAt(ctx context.Context, repo gitx.Repo, revs []string) ([]*beadsfile.File, error) {
-	files := make([]*beadsfile.File, 0, len(revs))
-	for _, rev := range revs {
-		data, ok, err := repo.Show(ctx, rev, beadsfile.Path)
-		if err != nil {
-			return nil, err
-		}
-		f := &beadsfile.File{}
-		if ok {
-			if f, err = beadsfile.Parse(strings.NewReader(data)); err != nil {
-				return nil, err
-			}
-		}
-		files = append(files, f)
-	}
-	return files, nil
 }
 
 func title(planned []Planned) string {

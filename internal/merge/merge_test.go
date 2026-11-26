@@ -66,8 +66,11 @@ func TestMerge_SameIssueDifferentFieldsTakesBoth(t *testing.T) {
 	m := issue(t, out, "t-e")
 	require.Equal(t, "renamed epic", m["title"])
 	require.EqualValues(t, 1, m["priority"])
-	require.Equal(t, "2026-01-03T00:00:00Z", m["updated_at"])
-	require.Equal(t, `{"id":"t-e","title":"renamed epic","status":"open","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-03T00:00:00Z"}`+"\n", out,
+	// The row mixes both sides, so it is stamped past theirs: a checkout whose
+	// database already held theirs' row would otherwise win the tie and drop
+	// our rename.
+	require.Equal(t, "2026-01-03T00:00:01Z", m["updated_at"])
+	require.Equal(t, `{"id":"t-e","title":"renamed epic","status":"open","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-03T00:00:01Z"}`+"\n", out,
 		"a key only theirs has lands where theirs placed it")
 }
 
@@ -388,7 +391,11 @@ func TestMerge_OneSidedCommentIDChangeSurvives(t *testing.T) {
 	require.Contains(t, out, stamped(bRepaired), "the repaired row moved, so it carries a newer updated_at")
 	require.Empty(t, rep.Renumbers)
 	requireUniqueCommentIDs(t, out)
-	require.Equal(t, []merge.Stamp{{ID: "t-b", Was: "2026-01-01T00:00:00Z", Now: "2026-01-01T00:00:01Z"}}, rep.Stamps)
+	// t-x mixes ours' field with theirs', so it is stamped as well.
+	require.Equal(t, []merge.Stamp{
+		{ID: "t-b", Was: "2026-01-01T00:00:00Z", Now: "2026-01-01T00:00:01Z"},
+		{ID: "t-x", Was: "2026-01-03T00:00:00Z", Now: "2026-01-03T00:00:01Z"},
+	}, rep.Stamps)
 }
 
 func TestMerge_IdenticalCommentsWithinOneIssueKeepTheirIDs(t *testing.T) {
@@ -438,4 +445,42 @@ func TestMerge_OneSidedCommentIDChangeWinsWithoutACollision(t *testing.T) {
 
 	require.Contains(t, out, stamped(bRenumbered))
 	require.Empty(t, rep.Renumbers)
+}
+
+// Two byte-identical comments on one bead are two comments. The set merge keys on
+// identity alone, so when each side adds something and theirs adds a SECOND copy
+// of a note the bead already carries, theirs' copy is dropped: it is "already in
+// ours", by identity, though ours has only one of it. Read the counts, as
+// assignCommentIDs does.
+func TestMerge_ARepeatedIdenticalCommentSurvives(t *testing.T) {
+	const (
+		same      = `{"id":1,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}`
+		other     = `{"id":2,"issue_id":"t-a","author":"x","text":"ours","created_at":"2026-01-02T00:00:00Z"}`
+		base      = `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z","comments":[` + same + `]}`
+		oursRow   = `{"id":"t-a","title":"a","updated_at":"2026-01-02T00:00:00Z","comments":[` + same + `,` + other + `]}`
+		theirsRow = `{"id":"t-a","title":"a","updated_at":"2026-01-03T00:00:00Z","comments":[` + same + `,` + same + `]}`
+	)
+
+	out, _ := run(t, file(t, base), file(t, oursRow), file(t, theirsRow))
+
+	// Comments are ordered by created_at, so theirs' second copy, sharing the
+	// first copy's instant, sorts ahead of ours' later note. All three survive.
+	require.Equal(t, []string{"same", "same", "ours"}, comments(t, issue(t, out, "t-a")),
+		"ours' note and theirs' second copy both survive")
+	require.Len(t, commentIDs(t, issue(t, out, "t-a")), 3, "each copy keeps an id of its own")
+}
+
+// A copy each side added of a note the parent lacked: each side's addition is a
+// comment of its own, so both are kept.
+func TestMerge_ASecondIdenticalCommentAddedOnBothSides(t *testing.T) {
+	const (
+		same  = `{"id":1,"issue_id":"t-a","author":"x","text":"same","created_at":"2026-01-01T00:00:00Z"}`
+		base  = `{"id":"t-a","title":"a","updated_at":"2026-01-01T00:00:00Z"}`
+		added = `{"id":"t-a","title":"a","updated_at":"2026-01-02T00:00:00Z","comments":[` + same + `]}`
+	)
+
+	out, _ := run(t, file(t, base), file(t, added), file(t, added))
+
+	require.Equal(t, []string{"same"}, comments(t, issue(t, out, "t-a")),
+		"both sides made the same addition, which is one comment")
 }

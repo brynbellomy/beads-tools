@@ -158,3 +158,21 @@ func TestCommitMsg_ADuplicateIDTheCommitDoesNotStageIsNotItsBusiness(t *testing.
 	r.G("add", "d.go")
 	require.NoError(t, check(t, r, "feat: d\n\nRefs: "+id+"\n"))
 }
+
+// A revert names no bead, and the trailer rule exempts one, as land pr does. The
+// file-integrity checks are a different matter: a revert that would give a
+// comment a new id is refused like any other commit, since merges and reverts
+// bring old file states back and that is exactly when an id goes astray.
+func TestCommitMsg_ARevertIsExemptFromTrailersButNotFromRenumbering(t *testing.T) {
+	r, _ := renumberRepo(t, commentRow("t-a", "4 from main"), commentRow("t-a", "5 from main"))
+
+	revert := "Revert \"beads: import\"\n\nThis reverts commit 0123456789abcdef.\n"
+	err := check(t, r, revert)
+	require.ErrorContains(t, err, "renumbers comments that already existed",
+		"the renumber check still applies to a revert")
+
+	// The same revert over a file whose comments kept their ids passes, and the
+	// missing trailer does not stop it.
+	r, _ = renumberRepo(t, commentRow("t-a", "4 from main"), commentRow("t-a", "4 from main"))
+	require.NoError(t, check(t, r, "Revert \"feat: something\"\n\nThis reverts commit 0123456789abcdef.\n"))
+}
