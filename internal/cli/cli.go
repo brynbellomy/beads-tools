@@ -36,21 +36,24 @@ usage:
         writes the result to OURS
   beads-tools hook commit-msg FILE
         check a commit message's Closes:/Refs: trailers; refuses a staged
-        issues file that adds duplicate comment ids or a dependency cycle
+        issues file that adds duplicate comment ids, renumbers an existing
+        comment, or adds a dependency cycle
   beads-tools land pr NUMBER [--dry-run] [--no-merge] [--close ID]... [--keep-open]
                  [--require-trailers=BOOL] [--admin]
         close the issues a pull request's commits close, on its branch,
         then merge it. issues it only references (Refs:) need a decision:
         --close each one it finishes, or --keep-open. refuses an issues file
-        with duplicate comment ids or a dependency cycle the base lacks
+        with duplicate comment ids or a dependency cycle the base lacks, and a
+        commit in the range that renumbers an existing comment
   beads-tools land sweep [--dry-run] [--no-merge] [--since WHEN] [--admin]
         close issues whose closing commits are already on the main branch,
         through a pull request
   beads-tools check [--base REV] [--head REV] [--require-trailers=BOOL]
         apply land pr's trailer rules to base..head (default: the main
         branch on the remote, and HEAD) and its duplicate comment id check to
-        the issues file at head, and refuses a dependency cycle head adds
-        that neither base nor the merge base holds; exits 1 when any fails.
+        the issues file at head, and refuses a comment a commit in the range
+        renumbers and a dependency cycle head adds that neither base nor the
+        merge base holds; exits 1 when any fails.
         Needs only git, for CI.
   beads-tools session SESSION-ID [--dir DIR] [--json]
   beads-tools session --user EMAIL [--dir DIR] [--json]

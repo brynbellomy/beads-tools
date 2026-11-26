@@ -426,9 +426,7 @@ func keySet(objs []*beadsfile.Object, identity func(*beadsfile.Object) string) m
 
 // commentIdentity names a comment by what was said, by whom, and when — not by
 // its ID, which br assigns from a per-database counter.
-func commentIdentity(c *beadsfile.Object) string {
-	return string(c.Raw("author")) + "\x00" + string(c.Raw("created_at")) + "\x00" + string(c.Raw("text"))
-}
+func commentIdentity(c *beadsfile.Object) string { return beadsfile.IdentityOf(c).String() }
 
 func dependencyIdentity(d *beadsfile.Object) string {
 	return string(d.Raw("depends_on_id")) + "\x00" + string(d.Raw("type"))
@@ -517,26 +515,6 @@ func renameCollisions(base, ours, theirs *beadsfile.File, rep *Report) (*beadsfi
 	return beadsfile.New(issues)
 }
 
-// commentKey names one comment within one issue. Identity alone is not enough:
-// br users post the same text on several issues in the same second, and nth
-// tells apart identical comments within one issue, in file order.
-type commentKey struct {
-	issue, identity string
-	nth             int
-}
-
-// commentKeys names each comment of one issue.
-func commentKeys(issue string, cs []*beadsfile.Object) []commentKey {
-	seen := map[string]int{}
-	keys := make([]commentKey, len(cs))
-	for i, c := range cs {
-		ident := commentIdentity(c)
-		keys[i] = commentKey{issue: issue, identity: ident, nth: seen[ident]}
-		seen[ident]++
-	}
-	return keys
-}
-
 // commentRank orders claims on a comment id; a lower rank claims first.
 type commentRank int
 
@@ -589,7 +567,7 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 			return errors.With(err, "reading comments").Set("id", iss.ID).Err()
 		}
 		parsed[i] = cs
-		for j, key := range commentKeys(iss.ID, cs) {
+		for j, key := range beadsfile.CommentKeys(iss.ID, cs) {
 			id, ok := beadsfile.CommentID(cs[j])
 			if !ok {
 				continue
@@ -669,22 +647,6 @@ func assignCommentIDs(base, ours, theirs *beadsfile.File, out []*beadsfile.Issue
 }
 
 // commentIDs maps each comment in f to its id, and returns the largest id.
-func commentIDs(f *beadsfile.File) (map[commentKey]int64, int64, error) {
-	ids := map[commentKey]int64{}
-	var maxID int64
-	for _, iss := range f.Issues {
-		cs, err := beadsfile.ParseObjectArray(iss.Obj.Raw("comments"))
-		if err != nil {
-			return nil, 0, errors.With(err, "reading comments").Set("id", iss.ID).Err()
-		}
-		for j, key := range commentKeys(iss.ID, cs) {
-			id, ok := beadsfile.CommentID(cs[j])
-			if !ok {
-				continue
-			}
-			ids[key] = id
-			maxID = max(maxID, id)
-		}
-	}
-	return ids, maxID, nil
+func commentIDs(f *beadsfile.File) (map[beadsfile.CommentKey]int64, int64, error) {
+	return f.CommentIDs()
 }
