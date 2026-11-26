@@ -269,6 +269,12 @@ func commentIDs(t *testing.T, m map[string]any) []int64 {
 	return out
 }
 
+// stamped returns line with its updated_at one second later: what the driver
+// writes on a row that differs from ours, so br's next import keeps it.
+func stamped(line string) string {
+	return strings.Replace(line, `"updated_at":"2026-01-01T00:00:00Z"`, `"updated_at":"2026-01-01T00:00:01Z"`, 1)
+}
+
 func requireUniqueCommentIDs(t *testing.T, out string) {
 	t.Helper()
 	f := file(t, strings.TrimSpace(out))
@@ -344,8 +350,9 @@ func TestMerge_OutputNeverHoldsADuplicateCommentID(t *testing.T) {
 
 	requireUniqueCommentIDs(t, out)
 	require.Contains(t, out, bulkB+"\n", "t-b held 162 in base and keeps it")
-	require.Contains(t, out, bulkA+"\n", "t-a takes back base's 819")
+	require.Contains(t, out, stamped(bulkA), "t-a takes back base's 819, stamped so the import keeps it")
 	require.Empty(t, rep.Renumbers)
+	require.Equal(t, []merge.Stamp{{ID: "t-a", Was: "2026-01-01T00:00:00Z", Now: "2026-01-01T00:00:01Z"}}, rep.Stamps)
 }
 
 // Without an id a side holds to fall back to, a duplicate an input carries
@@ -378,9 +385,10 @@ func TestMerge_OneSidedCommentIDChangeSurvives(t *testing.T) {
 	out, rep := run(t, base, ours, theirs)
 
 	require.Contains(t, out, a+"\n")
-	require.Contains(t, out, bRepaired+"\n")
+	require.Contains(t, out, stamped(bRepaired), "the repaired row moved, so it carries a newer updated_at")
 	require.Empty(t, rep.Renumbers)
 	requireUniqueCommentIDs(t, out)
+	require.Equal(t, []merge.Stamp{{ID: "t-b", Was: "2026-01-01T00:00:00Z", Now: "2026-01-01T00:00:01Z"}}, rep.Stamps)
 }
 
 func TestMerge_IdenticalCommentsWithinOneIssueKeepTheirIDs(t *testing.T) {
@@ -428,6 +436,6 @@ func TestMerge_OneSidedCommentIDChangeWinsWithoutACollision(t *testing.T) {
 
 	out, rep := run(t, base, ours, theirs)
 
-	require.Contains(t, out, bRenumbered+"\n")
+	require.Contains(t, out, stamped(bRenumbered))
 	require.Empty(t, rep.Renumbers)
 }
