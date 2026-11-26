@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 
+	"github.com/brynbellomy/go-utils/errors"
+
 	"github.com/brynbellomy/beads-tools/internal/beadsfile"
 	"github.com/brynbellomy/beads-tools/internal/gitx"
 	"github.com/brynbellomy/beads-tools/internal/trailers"
@@ -15,6 +17,47 @@ import (
 type Unlinked struct {
 	Commit trailers.Commit
 	Why    string
+}
+
+// Renumbered is a commit that moves an existing comment to an id its parents do
+// not hold for it.
+type Renumbered struct {
+	Commit trailers.Commit
+	beadsfile.RenumberedComment
+}
+
+// FindRenumbered returns every commit in the range that renumbers an existing
+// comment, applying the commit-msg hook's rule to each commit against its own
+// parents. A merge may take an id either parent holds. Landing checks the whole
+// range, not only the head, so a branch whose middle commit renumbered a
+// comment cannot land.
+func FindRenumbered(ctx context.Context, repo gitx.Repo, commits []trailers.Commit) ([]Renumbered, error) {
+	var out []Renumbered
+	for _, c := range commits {
+		data, ok, err := repo.Show(ctx, c.SHA, beadsfile.Path)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		head, err := beadsfile.Parse(strings.NewReader(data))
+		if err != nil {
+			return nil, errors.With(err, "reading issues file").Set("rev", c.SHA).Err()
+		}
+		parents, err := filesAt(ctx, repo, c.Parents)
+		if err != nil {
+			return nil, err
+		}
+		moved, err := beadsfile.NewRenumberedComments(head, parents...)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range moved {
+			out = append(out, Renumbered{Commit: c, RenumberedComment: m})
+		}
+	}
+	return out, nil
 }
 
 // FindUnlinked returns the commits that break the landing rules the commit-msg
@@ -52,8 +95,9 @@ func FindUnlinked(ctx context.Context, repo gitx.Repo, commits []trailers.Commit
 // Check applies the landing rules to the commits in base..head against the
 // issues file at head, printing each offender to out. It fails on a
 // duplicate comment id head holds and base does not, warning of those base
-// holds too, and on a dependency cycle head holds that neither base nor the
-// merge base of the two does. It notes,
+// holds too, on a commit in the range that renumbers an existing comment, and
+// on a dependency cycle head holds that neither base nor the merge base of the
+// two does. It notes,
 // without failing, each issue the range references but neither closes nor
 // finds closed. It reports whether the range may land. It needs only git, so
 // CI can run it.
@@ -67,6 +111,10 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 		return false, err
 	}
 	unlinked, err := FindUnlinked(ctx, repo, commits, issues, requireTrailers)
+	if err != nil {
+		return false, err
+	}
+	renumbered, err := FindRenumbered(ctx, repo, commits)
 	if err != nil {
 		return false, err
 	}
@@ -94,6 +142,9 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	for _, u := range unlinked {
 		fmt.Fprintf(out, "%s %s: %s\n", short(u.Commit.SHA), u.Commit.Subject, u.Why)
 	}
+	for _, r := range renumbered {
+		fmt.Fprintf(out, "%s %s: renumbers %s\n", short(r.Commit.SHA), r.Commit.Subject, r.RenumberedComment)
+	}
 	planned, _ := Plan(commits, issues, func(trailers.Commit) string { return "" })
 	closing := map[string]bool{}
 	for _, p := range planned {
@@ -111,7 +162,11 @@ func Check(ctx context.Context, repo gitx.Repo, base, head string, requireTraile
 	if len(cycles) > 0 {
 		fmt.Fprintf(out, "%s at %s adds %d dependency cycle(s); remove one edge of each, usually a related one, and say why in a comment on the bead\n", beadsfile.Path, head, len(cycles))
 	}
-	if len(unlinked) > 0 || len(dups) > 0 || len(cycles) > 0 {
+	if len(renumbered) > 0 {
+		fmt.Fprintf(out, "%d comment(s) in %s..%s changed id on the way; a comment keeps the id it had\n",
+			len(renumbered), base, head)
+	}
+	if len(unlinked) > 0 || len(dups) > 0 || len(cycles) > 0 || len(renumbered) > 0 {
 		return false, nil
 	}
 	fmt.Fprintf(out, "%d commit(s) in %s..%s name valid issues\n", len(commits), base, head)
