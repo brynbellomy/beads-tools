@@ -131,16 +131,16 @@ merge inherits, and a new comment has no such ID to hold. It is also rejected
 when the staged file adds a [dependency cycle](#dependency-cycles) that no
 parent holds. Set `BEADS_TOOLS_SKIP=1` to skip the checks for one commit.
 
-A comment is identified by the issue, `created_at`, `author` and text, plus
-which of several identical comments on one issue it is, in file order. Its ID
-is not part of its identity: br assigns IDs from a counter kept in one
-database, so two checkouts mint the same "next" number, and a worktree whose
-database is stale can fold a pulled comment into its own counter and give it
-a new ID on the next flush. That renumbering makes the comment a different
-comment to anything that recorded it by ID. br refuses such a flush in 0.7.6,
-where it was reproduced, and flushed silently in 0.2.15, where it was also
-reproduced; the hook refuses the commit that would carry it, so it holds for
-either version.
+A comment is identified by the issue, `created_at`, `author` and text. Two
+comments on one issue that agree on all four are interchangeable, so which of
+them carries which ID is not observable. The ID is not part of its identity: br
+assigns IDs from a counter kept in one database, so two checkouts mint the same
+"next" number, and a worktree whose database is stale can fold a pulled comment
+into its own counter and give it a new ID on the next flush. That renumbering
+makes the comment a different comment to anything that recorded it by ID. br
+0.2.15 flushed such a renumbering silently, and later versions refuse the
+flush. The hook refuses the commit that would carry it either way, so it does
+not depend on which br wrote the file.
 
 ## Dependency cycles
 

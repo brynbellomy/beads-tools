@@ -106,26 +106,54 @@ func noteOf(issueID string, c CommentIdentity) noteKey {
 type commentEntry struct {
 	key   CommentKey
 	note  noteKey
+	idx   int // which of several identical comments on the bead, in file order
 	id    int64
 	hasID bool
 }
 
 // eachComment calls fn for every comment in f, in file order.
+//
+// The comments array of each issue is decoded once per file and kept: the guard
+// walks a file's comments three times over, and once per parent as well, where it
+// used to re-decode every comment on every walk. A file is read-only once
+// parsed, so the index is safe to share.
 func (f *File) eachComment(fn func(commentEntry) error) error {
-	for _, iss := range f.Issues {
-		cs, err := ParseObjectArray(iss.Obj.Raw("comments"))
-		if err != nil {
-			return errors.With(err, "reading comments").Set("id", iss.ID).Err()
-		}
-		for i, key := range CommentKeys(iss.ID, cs) {
-			id, ok := CommentID(cs[i])
-			e := commentEntry{key: key, note: noteOf(iss.ID, key.CommentIdentity), id: id, hasID: ok}
-			if err := fn(e); err != nil {
-				return err
-			}
+	idx, err := f.commentIndex()
+	if err != nil {
+		return err
+	}
+	for _, e := range idx {
+		if err := fn(e); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// commentIndex returns every comment in f, in file order, decoding it once.
+func (f *File) commentIndex() ([]commentEntry, error) {
+	if f.comments != nil {
+		return *f.comments, nil
+	}
+	var out []commentEntry
+	for _, iss := range f.Issues {
+		cs, err := ParseObjectArray(iss.Obj.Raw("comments"))
+		if err != nil {
+			return nil, errors.With(err, "reading comments").Set("id", iss.ID).Err()
+		}
+		for i, key := range CommentKeys(iss.ID, cs) {
+			id, ok := CommentID(cs[i])
+			out = append(out, commentEntry{
+				key:   key,
+				note:  noteOf(iss.ID, key.CommentIdentity),
+				idx:   key.Occurrence,
+				id:    id,
+				hasID: ok,
+			})
+		}
+	}
+	f.comments = &out
+	return out, nil
 }
 
 // CommentIDs maps each comment in f to its id, and returns the largest id.
@@ -238,35 +266,36 @@ func (r RenumberedComment) String() string {
 
 // NewRenumberedComments returns the existing comments head gives an id none of
 // the parents holds for them. A comment is named by the bead it is on, who wrote
-// it, when, and what it says, so a comment that merely gains an id passes. So
-// does a comment head keeps at an id a parent held for it, which is how a merge
-// inherits the ids its two sides carry instead of being refused.
+// it, when, and what it says, so it carries no position: a reordering among
+// byte-identical comments never renumbers anything. An id counts as given up only
+// when head no longer holds it, and only when the merge driver had no reason to
+// move that comment off it.
 //
-// Comments are compared by the set of ids a parent gave each identity, never by
-// position, so a reordering, an insertion or a deletion among byte-identical
-// comments on one bead changes no id.
+// The driver reconciles br's file-wide id namespace in two places, and both are
+// per (comment, id), never per id alone:
 //
-// Two reconciliations pass, because br's id is one namespace for the whole file:
+//   - within one parent, an id the same bead used twice;
+//   - across the two parents, an id each side used once on a different bead.
 //
-//   - An id two comments of the SAME bead shared, which one of them steps off.
-//     That id never named one comment, so moving off it is a repair, both of a
-//     file that arrived that way and of the collision the merge driver resolves.
-//   - An id the two parents held on different beads, one each. Neither side was
-//     inconsistent, but combining them puts one id on two beads and br refuses to
-//     import that, so the driver moves one and mints a fresh id for it.
-//
-// An id one parent already held twice is neither, whether the two comments sit on
-// one bead or on two: that is the duplicate br refuses, so a comment the stale
-// store walked off such an id is a renumbering like any other.
+// Any other id a comment leaves is a renumbering, however many other comments
+// happened to use that id.
 func NewRenumberedComments(head *File, parents ...*File) ([]RenumberedComment, error) {
+	// held: the ids each parent gave each comment, so a lost id can be spotted.
 	held := map[noteKey]map[int64]bool{}
+	// heldBy: the same ids, one set per parent, so a merge that took either
+	// side's ids wholesale reads as inheritance rather than loss.
 	heldBy := map[noteKey][]map[int64]bool{}
-	dupInParent := map[int64]bool{}
-	beadsPerParent := map[int64]map[string]bool{}
+	// sharedWithinBead: (comment, id) pairs one parent used twice on one bead,
+	// which never named a single comment and which the driver repairs.
 	sharedWithinBead := map[noteKey]map[int64]bool{}
+	// dupOneParent: ids one parent already used twice, which no merge created.
+	dupOneParent := map[int64]bool{}
+
 	for _, p := range parents {
-		uses := map[int64]map[noteKey]bool{}
-		thisParent := map[noteKey]map[int64]bool{}
+		noteIDs := map[noteKey]map[int64]bool{}
+		beadCounts := map[string]map[int64]int{}
+		entries := map[int64][]noteKey{}
+		perParentUses := map[int64]int{}
 		err := p.eachComment(func(e commentEntry) error {
 			if !e.hasID {
 				return nil
@@ -275,50 +304,89 @@ func NewRenumberedComments(head *File, parents ...*File) ([]RenumberedComment, e
 				held[e.note] = map[int64]bool{}
 			}
 			held[e.note][e.id] = true
-			if thisParent[e.note] == nil {
-				thisParent[e.note] = map[int64]bool{}
+			if noteIDs[e.note] == nil {
+				noteIDs[e.note] = map[int64]bool{}
 			}
-			thisParent[e.note][e.id] = true
-			if uses[e.id] == nil {
-				uses[e.id] = map[noteKey]bool{}
+			noteIDs[e.note][e.id] = true
+			if beadCounts[e.note.IssueID] == nil {
+				beadCounts[e.note.IssueID] = map[int64]int{}
 			}
-			uses[e.id][e.note] = true
+			beadCounts[e.note.IssueID][e.id]++
+			entries[e.id] = append(entries[e.id], e.note)
+			perParentUses[e.id]++
 			return nil
 		})
 		if err != nil {
 			return nil, err
 		}
-		for note, ids := range thisParent {
+		for note, ids := range noteIDs {
 			heldBy[note] = append(heldBy[note], ids)
 		}
-		for id, notes := range uses {
-			perBead := map[string]int{}
-			for note := range notes {
-				perBead[note.IssueID]++
+		for id, n := range perParentUses {
+			if n > 1 {
+				dupOneParent[id] = true
 			}
-			if beadsPerParent[id] == nil {
-				beadsPerParent[id] = map[string]bool{}
-			}
-			for bead := range perBead {
-				beadsPerParent[id][bead] = true
-			}
-			if len(notes) > 1 {
-				// This one parent already held the id twice, on this bead or across
-				// two: no merge made that up.
-				dupInParent[id] = true
-			}
-			for note := range notes {
-				if perBead[note.IssueID] < 2 {
+		}
+		// An id this parent put on the same bead more than once.
+		for bead, counts := range beadCounts {
+			for id, n := range counts {
+				if n < 2 {
 					continue
 				}
-				if sharedWithinBead[note] == nil {
-					sharedWithinBead[note] = map[int64]bool{}
+				for _, note := range entries[id] {
+					if note.IssueID != bead {
+						continue
+					}
+					if sharedWithinBead[note] == nil {
+						sharedWithinBead[note] = map[int64]bool{}
+					}
+					sharedWithinBead[note][id] = true
 				}
-				sharedWithinBead[note][id] = true
 			}
 		}
 	}
 
+	// An id each parent used once, on different beads: a collision only combining
+	// the two makes, which the driver resolves by keeping the id on one side and
+	// moving the other comment to a fresh one. crossClaims records the two comments
+	// that made such a collision, so only one of them may leave the id. An id one
+	// parent used twice is a duplicate, not a collision, and exempts nobody.
+	sides := map[int64]map[noteKey]int{}
+	for _, p := range parents {
+		thisSide := map[noteKey]bool{}
+		err := p.eachComment(func(e commentEntry) error {
+			if !e.hasID || thisSide[e.note] {
+				return nil
+			}
+			thisSide[e.note] = true
+			if sides[e.id] == nil {
+				sides[e.id] = map[noteKey]int{}
+			}
+			sides[e.id][e.note]++
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	crossClaims := map[int64][]noteKey{}
+	for id, notes := range sides {
+		if dupOneParent[id] || len(parents) < 2 {
+			continue
+		}
+		beads := map[string]bool{}
+		for note := range notes {
+			beads[note.IssueID] = true
+		}
+		if len(beads) < 2 {
+			continue
+		}
+		for note := range notes {
+			crossClaims[id] = append(crossClaims[id], note)
+		}
+	}
+
+	// stillHeld: the ids head gives each comment now.
 	stillHeld := map[noteKey]map[int64]bool{}
 	var order []noteKey
 	firstSeen := map[noteKey]CommentKey{}
@@ -353,15 +421,7 @@ func NewRenumberedComments(head *File, parents ...*File) ([]RenumberedComment, e
 		}
 		var lost []int64
 		for id := range before {
-			if now[id] {
-				continue
-			}
-			if sharedWithinBead[note][id] {
-				// A repair within the bead.
-				continue
-			}
-			if !dupInParent[id] && len(beadsPerParent[id]) > 1 {
-				// The merge put one id on two beads; the driver reconciles it.
+			if now[id] || sharedWithinBead[note][id] || keptByTheOther(note, id, crossClaims, stillHeld) {
 				continue
 			}
 			lost = append(lost, id)
@@ -373,6 +433,19 @@ func NewRenumberedComments(head *File, parents ...*File) ([]RenumberedComment, e
 		out = append(out, RenumberedComment{Key: firstSeen[note], Was: lost, Now: smallestNew(before, now)})
 	}
 	return out, nil
+}
+
+// keptByTheOther reports whether note may leave id because it is one of the two
+// comments a cross-parent collision put on that id, and the other one still holds
+// it. That is the state the merge driver leaves behind when it keeps one side's id
+// and moves the other's comment.
+func keptByTheOther(note noteKey, id int64, claims map[int64][]noteKey, stillHeld map[noteKey]map[int64]bool) bool {
+	for _, claimant := range claims[id] {
+		if claimant != note && stillHeld[claimant][id] {
+			return true
+		}
+	}
+	return false
 }
 
 // inheritsAny reports whether head gives the comment exactly the ids one parent
@@ -418,28 +491,4 @@ func smallestNew(before, now map[int64]bool) int64 {
 		return all[0]
 	}
 	return 0
-}
-
-// currentIDs picks the id head gave an identity now, for a message, preferring
-// one the parent did not hold so the report reads as a move.
-func currentIDs(now map[int64]int, lost []int64) int64 {
-	gone := map[int64]bool{}
-	for _, id := range lost {
-		gone[id] = true
-	}
-	var added []int64
-	for id := range now {
-		if !gone[id] {
-			added = append(added, id)
-		}
-	}
-	slices.Sort(added)
-	if len(added) > 0 {
-		for _, id := range added {
-			if !gone[id] {
-				return id
-			}
-		}
-	}
-	return lost[0]
 }

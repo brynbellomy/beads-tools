@@ -279,3 +279,50 @@ func TestNewRenumberedComments_ARespelledTimestampAloneIsNotARenumber(t *testing
 	require.NoError(t, err)
 	require.Empty(t, moved)
 }
+
+// The cross-parent exemption must apply only to the (comment, id) pair the merge
+// driver actually repaired. Two parents each using an id once, on different beads,
+// make br's file-wide id namespace collide once the two are combined, and the
+// driver resolves that by keeping OUR id and moving theirs' comment to a fresh
+// one. That must not become a licence for any comment that held the id: a stale
+// store walking a comment off it is still a renumbering.
+func TestNewRenumberedComments_TwoParentsSharingAnIDDoNotExcuseAStaleStoreRenumber(t *testing.T) {
+	// ours = parents[0], theirs = parents[1].
+	ours := parseRows(t,
+		`{"id":"t-a","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"a","created_at":"2026-01-01T00:00:00Z"}]}`)
+	theirs := parseRows(t,
+		`{"id":"t-b","comments":[{"id":7,"issue_id":"t-b","author":"x","text":"b","created_at":"2026-01-01T00:00:00Z"}]}`)
+
+	// What the driver writes: ours keeps 7, theirs' comment moves to a fresh id.
+	driverRepair := parseRows(t,
+		`{"id":"t-a","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"a","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-b","comments":[{"id":8,"issue_id":"t-b","author":"x","text":"b","created_at":"2026-01-01T00:00:00Z"}]}`)
+	moved, err := beadsfile.NewRenumberedComments(driverRepair, ours, theirs)
+	require.NoError(t, err)
+	require.Empty(t, moved, "the driver moved theirs' comment off the id the two sides share")
+
+	// A comment of a third bead the parents never touched, walked off an id by a
+	// stale store, is a renumbering. Keying the exemption on the id alone let such
+	// a comment through whenever two parents shared that id.
+	withThird := parseRows(t,
+		`{"id":"t-a","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"a","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-b","comments":[{"id":7,"issue_id":"t-b","author":"x","text":"b","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-c","comments":[{"id":12,"issue_id":"t-c","author":"x","text":"c","created_at":"2026-01-01T00:00:00Z"}]}`)
+	stale := parseRows(t,
+		`{"id":"t-a","comments":[{"id":7,"issue_id":"t-a","author":"x","text":"a","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-b","comments":[{"id":7,"issue_id":"t-b","author":"x","text":"b","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-c","comments":[{"id":19,"issue_id":"t-c","author":"x","text":"c","created_at":"2026-01-01T00:00:00Z"}]}`)
+	moved, err = beadsfile.NewRenumberedComments(stale, withThird, withThird)
+	require.NoError(t, err)
+	require.Equal(t, []string{`comment "c" by "x" at "2026-01-01T00:00:00Z" on t-c: id 12 -> 19`}, movedStrings(moved),
+		"t-c never shared id 7, so the shared id has nothing to do with it")
+
+	// A claimant moving while neither claimant keeps the id is not the driver's
+	// repair either: the driver always leaves the id on one side.
+	walked := parseRows(t,
+		`{"id":"t-a","comments":[{"id":9,"issue_id":"t-a","author":"x","text":"a","created_at":"2026-01-01T00:00:00Z"}]}`,
+		`{"id":"t-b","comments":[{"id":10,"issue_id":"t-b","author":"x","text":"b","created_at":"2026-01-01T00:00:00Z"}]}`)
+	moved, err = beadsfile.NewRenumberedComments(walked, ours, theirs)
+	require.NoError(t, err)
+	require.Len(t, moved, 2, "a stale store walked both comments off the shared id")
+}

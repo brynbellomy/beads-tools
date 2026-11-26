@@ -11,22 +11,19 @@ import (
 	"github.com/brynbellomy/beads-tools/internal/gitx"
 )
 
-// parseCount counts issues files parsed, so a test can prove the rules read each
-// blob once rather than once per commit and once per parent.
+// parseCount counts issues files parsed. It is unexported and only read by this
+// package's own tests, so nothing outside can depend on it.
 var parseCount atomic.Int64
-
-// ResetParseCount zeroes the parse counter.
-func ResetParseCount() { parseCount.Store(0) }
-
-// ParseCount reports how many issues files have been parsed.
-func ParseCount() int64 { return parseCount.Load() }
 
 // filesAt is the issues file as of a revision, parsed once per blob.
 //
 // A range check visits a commit's file and each parent's file, and neighbouring
 // commits share most of those blobs: a 100-commit branch read the same 7 MB file
-// about 200 times. Memoizing by blob SHA makes the work proportional to the blobs
+// about 100 times. Memoizing by blob SHA makes the work proportional to the blobs
 // the range actually touched. A rev with no issues file is remembered as absent.
+//
+// The *beadsfile.File values returned are shared and must be treated as read-only;
+// a file decodes its comment index on first use and never mutates it afterwards.
 type filesAt struct {
 	repo   gitx.Repo
 	byRev  map[string]*beadsfile.File
@@ -45,7 +42,7 @@ func newFilesAt(repo gitx.Repo) *filesAt {
 }
 
 // at returns the issues file as of rev, or nil when rev holds none. The returned
-// file is shared and must be treated as read-only.
+// file is shared and read-only.
 func (c *filesAt) at(ctx context.Context, rev string) (*beadsfile.File, error) {
 	if f, ok := c.byRev[rev]; ok {
 		return f, nil

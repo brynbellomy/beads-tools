@@ -43,6 +43,10 @@ func (i *Issue) Bytes() ([]byte, error) {
 type File struct {
 	Issues []*Issue
 	byID   map[string]*Issue
+	// comments caches the decoded comments of every issue, in file order. It is
+	// built on first use and never mutated afterwards, so a file handed around by
+	// the land cache is safe to read from several callers.
+	comments *[]commentEntry
 }
 
 // Parse reads issues.jsonl. It rejects merge conflict markers, malformed lines
