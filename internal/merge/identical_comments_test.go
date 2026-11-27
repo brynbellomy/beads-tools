@@ -73,6 +73,20 @@ func TestMerge_RepeatedIdenticalCommentsAgreeWithTheGuard(t *testing.T) {
 	}
 }
 
+func TestMerge_DeleteOneIdenticalCommentWhileTheirsAddsAnother(t *testing.T) {
+	merged, rep, err := merge.Merge(
+		file(t, issueWithCopies(1, 2)),
+		file(t, issueWithCopiesAndPriority(1)),
+		file(t, issueWithCopiesAndAssignee(1, 2, 3)),
+	)
+	require.NoError(t, err)
+	require.True(t, rep.Clean(), rep.String())
+
+	var cs []map[string]any
+	require.NoError(t, json.Unmarshal(merged.Get("t-a").Obj.Raw("comments"), &cs))
+	require.Len(t, cs, 3, "ours' deletion leaves theirs' surviving base copies and new addition")
+}
+
 func TestMerge_RepeatedIdenticalCommentsKeepTheirMultiplicity(t *testing.T) {
 	for _, count := range []int{1, 2, 3} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {

@@ -482,12 +482,19 @@ func mergeSetField(key string, b, o, t json.RawMessage) (json.RawMessage, error)
 	inBase := keyCount(bs, identity)
 	inOurs := keyCount(ous, identity)
 	inTheirs := keyCount(ts, identity)
-	// Keep each base copy when both sides retain it; each side's excess over
-	// base is an independent addition. The base copy must not count as an
-	// addition when both sides increased the original multiplicity.
+	// Both sides' additions beyond base survive, including additions to a
+	// base identity whose other side deleted one of its copies. If either
+	// side removed the identity completely, its deletion stands.
 	target := map[string]int{}
 	for k, n := range inBase {
-		target[k] = min(inOurs[k], inTheirs[k]) + max(0, inOurs[k]-n) + max(0, inTheirs[k]-n) - min(max(0, inOurs[k]-n), max(0, inTheirs[k]-n))
+		switch {
+		case inOurs[k] == 0 || inTheirs[k] == 0:
+			target[k] = 0
+		case inOurs[k] < n || inTheirs[k] < n:
+			target[k] = max(inOurs[k], inTheirs[k])
+		default:
+			target[k] = inOurs[k] + inTheirs[k] - n
+		}
 	}
 	for k, n := range inOurs {
 		if inBase[k] == 0 {
